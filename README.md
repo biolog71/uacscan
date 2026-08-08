@@ -151,3 +151,8 @@ brings the two halves of UAC into agreement.
   implemented natively (the `security.capability` xattr and the statx immutable
   attribute), but they emit bare paths rather than reproducing `getcap` and
   `lsattr` output, so the harness compares them as path sets rather than bytes.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE). The same license UAC itself uses,
+whose artifact definitions and output formats this project reads and reproduces.
