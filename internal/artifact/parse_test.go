@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"uacscan/internal/uacpath"
+	"io/fs"
+
+	"uacscan/internal/uacdata"
 )
 
 func TestParseBodyfile(t *testing.T) {
@@ -123,8 +125,7 @@ func TestInlineListItemKey(t *testing.T) {
 // The parser has to survive the real corpus, not just synthetic input. This is
 // the test that would have caught the %-scalar problem.
 func TestParseEveryRealUACArtifact(t *testing.T) {
-	root := uacArtifactRoot(t)
-	docs, errs := LoadDir(root)
+	docs, errs := LoadFS(uacArtifacts(t))
 	if len(errs) > 0 {
 		for f, err := range errs {
 			t.Errorf("%s: %v", f, err)
@@ -160,13 +161,15 @@ func TestParseEveryRealUACArtifact(t *testing.T) {
 	}
 }
 
-func uacArtifactRoot(t *testing.T) string {
+// uacArtifacts returns the corpus baked into the binary, so these tests need
+// no UAC checkout and never skip.
+func uacArtifacts(t *testing.T) fs.FS {
 	t.Helper()
-	d := uacpath.Artifacts()
-	if d == "" {
-		t.Skip("UAC artifact corpus not found; set UAC_ROOT")
+	f, err := uacdata.Artifacts()
+	if err != nil {
+		t.Fatalf("embedded artifact corpus unavailable: %v", err)
 	}
-	return d
+	return f
 }
 
 func TestStripCommentHonoursQuotes(t *testing.T) {

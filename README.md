@@ -35,13 +35,57 @@ go build -o uacscan ./cmd/uacscan
 ```
 
 ```bash
-./uacscan -m /mnt/image -a /path/to/uac/artifacts -o ./out -include 'bodyfile/*,system/*'
+./uacscan -m /mnt/image -o ./out -include 'bodyfile/*,system/*'
 ```
 
-Key flags: `-m` mount point, `-a` UAC artifacts directory, `-o` output
-directory, `-c` a `uac.conf` to read (defaults to the one next to `-a`),
-`-include`/`-exclude` artifact globs, `-start-date-days`/`-end-date-days` for
-the date range, `-buffer-limit` for the small-file threshold.
+No path to a UAC checkout is needed — the artifact definitions are compiled
+into the binary. Copy the executable to an examiner workstation and it works.
+
+Key flags: `-m` mount point, `-o` output directory, `-include`/`-exclude`
+artifact globs, `-start-date-days`/`-end-date-days` for the date range,
+`-buffer-limit` for the small-file threshold, `-version` to see which UAC
+corpus is baked in. To run against a newer or modified checkout instead of the
+embedded copy, pass `-a /path/to/uac/artifacts` (which also switches `uac.conf`
+to that checkout's, so definitions and configuration never come from different
+places); `-c` overrides the config file on its own.
+
+## Embedded artifact definitions
+
+UAC's `artifacts/`, `config/` and `profiles/` are packed into a single
+`tar.gz` — 428 files, 319 KiB of YAML compressing to 49 KiB — and embedded with
+`go:embed`. Total binary: about 3.7 MB.
+
+It is unpacked **into memory** at first use, never onto disk. An acquisition
+tool has no business scattering temporary files across the examiner's machine,
+and there is no reason to: the whole corpus is smaller than a single collected
+log file. Loading goes through `fs.FS`, so the embedded copy and a real
+directory (`os.DirFS`) run through identical code.
+
+A `VERSION` file rides along recording the UAC release and commit the corpus
+was built from, reported by `-version` and printed on every run. For a forensic
+tool that provenance is not optional: a collection must be traceable to the
+definitions that produced it.
+
+```bash
+./uacscan -version
+# uacscan (embedded UAC artifacts 3.3.0, commit 7376467)
+```
+
+```bash
+./uacscan -extract ./defs    # write the definitions out to read or edit
+```
+
+Regenerate after updating the UAC checkout:
+
+```bash
+go generate ./internal/uacdata
+```
+
+The archive is deterministic — entries sorted, timestamps and ownership
+zeroed — so the same checkout always yields an identical blob and therefore a
+reproducible binary. `TestEmbeddedMatchesCheckout` fails if the embedded copy
+has drifted from a UAC checkout it can find, which is the only thing that would
+catch a forgotten `go generate`.
 
 ## Running the comparison
 
@@ -56,8 +100,11 @@ go run ./test/harness -image /usr/share/doc -v
 The harness builds a fixture image (or takes `-image`), runs both tools over it,
 and reports every difference. It is also wired into `go test`.
 
-It needs a checkout of [UAC](https://github.com/tclahr/uac) to compare against.
-It is found automatically when the two live side by side:
+The harness needs a checkout of [UAC](https://github.com/tclahr/uac), because it
+runs the real shell implementation. It deliberately reads that checkout's
+artifacts for both sides of the comparison rather than the embedded copy, so
+the two tools are provably given the same definitions. It is found
+automatically when the two live side by side:
 
 ```
 parent/
@@ -65,9 +112,10 @@ parent/
   uacscan/   <- this repository
 ```
 
-Otherwise set `UAC_ROOT=/path/to/uac`. Every test that needs UAC skips itself
-cleanly when it cannot be found, so `go test ./...` works on a machine that only
-has this project.
+Otherwise set `UAC_ROOT=/path/to/uac`. Only the harness needs it — the parser
+and rule-compiler tests run against the embedded corpus and never skip — and the
+tests that do need it skip cleanly, so `go test ./...` works on a machine that
+has nothing but this repository.
 
 ## Design
 

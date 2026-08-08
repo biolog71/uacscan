@@ -10,6 +10,9 @@ package config
 
 import (
 	"bufio"
+	"errors"
+	"io"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
@@ -40,20 +43,40 @@ func Default() *Config {
 	}
 }
 
-// Load reads a uac.conf, falling back to the defaults for anything absent. A
-// missing file is not an error: the defaults are the shipped configuration.
+// Load reads a uac.conf from disk, falling back to the defaults for anything
+// absent. A missing file is not an error: the defaults are the shipped
+// configuration.
 func Load(path string) (*Config, error) {
-	c := Default()
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return c, nil
+			return Default(), nil
 		}
-		return c, err
+		return Default(), err
 	}
 	defer f.Close()
+	return Read(f)
+}
 
-	sc := bufio.NewScanner(f)
+// LoadFS reads a uac.conf out of any filesystem, so the embedded copy and an
+// operator-supplied one share the same parsing.
+func LoadFS(fsys fs.FS, name string) (*Config, error) {
+	f, err := fsys.Open(name)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return Default(), nil
+		}
+		return Default(), err
+	}
+	defer f.Close()
+	return Read(f)
+}
+
+// Read parses a uac.conf from r.
+func Read(r io.Reader) (*Config, error) {
+	c := Default()
+
+	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {

@@ -5,6 +5,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,6 +20,7 @@ import (
 	"uacscan/internal/passwd"
 	"uacscan/internal/rules"
 	"uacscan/internal/spool"
+	"uacscan/internal/uacdata"
 	"uacscan/internal/walk"
 )
 
@@ -26,7 +28,9 @@ func main() {
 	var (
 		mount     = flag.String("m", "/", "mount point of the image to collect from")
 		outDir    = flag.String("o", "", "output directory (required)")
-		artDir    = flag.String("a", "", "UAC artifacts directory (required)")
+		artDir    = flag.String("a", "", "override the embedded artifact definitions with a UAC artifacts directory")
+		extract   = flag.String("extract", "", "write the embedded UAC definitions to this directory and exit")
+		showVer   = flag.Bool("version", false, "print version information and exit")
 		include   = flag.String("include", "*", "comma-separated globs selecting artifacts, e.g. 'bodyfile/*,system/*'")
 		exclude   = flag.String("exclude", "", "comma-separated globs of artifacts to skip")
 		startDays = flag.Int("start-date-days", 0, "only files changed within this many days (0 disables)")
@@ -39,8 +43,20 @@ func main() {
 	)
 	flag.Parse()
 
-	if *outDir == "" || *artDir == "" {
-		fmt.Fprintln(os.Stderr, "uacscan: -o and -a are required")
+	if *showVer {
+		release, commit := uacdata.Version()
+		fmt.Printf("uacscan (embedded UAC artifacts %s, commit %s)\n", release, commit)
+		return
+	}
+	if *extract != "" {
+		if err := extractTo(*extract); err != nil {
+			fmt.Fprintf(os.Stderr, "uacscan: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *outDir == "" {
+		fmt.Fprintln(os.Stderr, "uacscan: -o is required")
 		flag.Usage()
 		os.Exit(2)
 	}
@@ -62,20 +78,19 @@ func run(mount, outDir, artDir, include, exclude, excludePaths, confPath string,
 		return fmt.Errorf("mount point %s is not a directory", mount)
 	}
 
-	docs, parseErrs := artifact.LoadDir(artDir)
+	// Definitions come from the copy baked into the binary unless the operator
+	// points at a checkout, so a collection needs nothing but the executable.
+	artFS, conf, source, err := loadDefinitions(artDir, confPath)
+	if err != nil {
+		return err
+	}
+
+	docs, parseErrs := artifact.LoadFS(artFS)
 	for f, err := range parseErrs {
 		fmt.Fprintf(os.Stderr, "warning: %s: %v\n", f, err)
 	}
 	if len(docs) == 0 {
-		return fmt.Errorf("no artifacts found under %s", artDir)
-	}
-
-	if confPath == "" {
-		confPath = filepath.Join(filepath.Dir(strings.TrimSuffix(artDir, "/")), "config", "uac.conf")
-	}
-	conf, err := config.Load(confPath)
-	if err != nil {
-		return fmt.Errorf("loading %s: %w", confPath, err)
+		return fmt.Errorf("no artifact definitions found in %s", source)
 	}
 
 	accounts := passwd.Load(mount)
@@ -188,6 +203,7 @@ func run(mount, outDir, artDir, include, exclude, excludePaths, confPath string,
 	}
 
 	st := w.Stats()
+	fmt.Printf("definitions   : %s\n", source)
 	fmt.Printf("mount point   : %s\n", mount)
 	fmt.Printf("rules         : %d\n", len(compiled))
 	fmt.Printf("files visited : %d\n", st.Files)
@@ -204,6 +220,66 @@ func run(mount, outDir, artDir, include, exclude, excludePaths, confPath string,
 	for _, e := range man {
 		fmt.Printf("  %-50s %8d lines  %9d bytes\n", e.Rel, e.Lines, e.Bytes)
 	}
+	return nil
+}
+
+// loadDefinitions resolves where the artifact definitions and uac.conf come
+// from. Embedded by default; a directory override switches both, so the
+// definitions and the configuration always come from the same place rather
+// than being silently mixed.
+func loadDefinitions(artDir, confPath string) (fs.FS, *config.Config, string, error) {
+	if artDir == "" {
+		artFS, err := uacdata.Artifacts()
+		if err != nil {
+			return nil, nil, "", err
+		}
+		full, err := uacdata.FS()
+		if err != nil {
+			return nil, nil, "", err
+		}
+		conf, err := config.LoadFS(full, "config/uac.conf")
+		if err != nil {
+			return nil, nil, "", fmt.Errorf("reading the embedded uac.conf: %w", err)
+		}
+		if confPath != "" {
+			if conf, err = config.Load(confPath); err != nil {
+				return nil, nil, "", fmt.Errorf("loading %s: %w", confPath, err)
+			}
+		}
+		release, commit := uacdata.Version()
+		return artFS, conf, fmt.Sprintf("embedded (UAC %s, commit %s)", release, commit), nil
+	}
+
+	if confPath == "" {
+		confPath = filepath.Join(filepath.Dir(strings.TrimSuffix(artDir, "/")), "config", "uac.conf")
+	}
+	conf, err := config.Load(confPath)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("loading %s: %w", confPath, err)
+	}
+	return os.DirFS(artDir), conf, artDir, nil
+}
+
+// extractTo writes the embedded definitions out, for operators who want to
+// read or edit them.
+func extractTo(dir string) error {
+	n := 0
+	err := uacdata.Extract(dir, func(name string, data []byte) error {
+		full := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(full, data, 0644); err != nil {
+			return err
+		}
+		n++
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	release, commit := uacdata.Version()
+	fmt.Printf("extracted %d files (UAC %s, commit %s) to %s\n", n, release, commit, dir)
 	return nil
 }
 

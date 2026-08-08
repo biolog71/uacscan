@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"uacscan/internal/uacpath"
+	"uacscan/internal/uacdata"
 )
 
 // The defaults must match UAC's shipped config, because that is what the
@@ -25,11 +25,11 @@ func TestDefaultsMatchShippedUACConfig(t *testing.T) {
 }
 
 func TestLoadRealUACConfig(t *testing.T) {
-	p := uacpath.Config()
-	if p == "" {
-		t.Skip("UAC config not available; set UAC_ROOT")
+	f, err := uacdata.FS()
+	if err != nil {
+		t.Fatal(err)
 	}
-	c, err := Load(p)
+	c, err := LoadFS(f, "config/uac.conf")
 	if err != nil {
 		t.Fatal(err)
 	}

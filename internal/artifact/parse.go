@@ -12,8 +12,8 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -75,7 +75,7 @@ func (e Entry) ID() string {
 	return fmt.Sprintf("%s#%d", strings.TrimSuffix(e.Source, ".yaml"), e.Index)
 }
 
-// ParseFile reads one artifact file.
+// ParseFile reads one artifact file from disk.
 func ParseFile(path, source string) (*Doc, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -344,25 +344,37 @@ func shellSplit(s string) []string {
 	return out
 }
 
-// LoadDir reads every *.yaml under root, returning documents keyed by their
-// path relative to root. Parse failures are returned per file rather than
-// aborting the load, so one bad artifact cannot take down a collection.
+// LoadDir reads every *.yaml under a directory on disk.
 func LoadDir(root string) ([]*Doc, map[string]error) {
+	return LoadFS(os.DirFS(root))
+}
+
+// LoadFS reads every *.yaml in fsys, returning documents keyed by their path
+// within it. Parse failures are returned per file rather than aborting the
+// load, so one malformed artifact cannot take down a whole collection.
+//
+// Taking an fs.FS rather than a path is what lets the embedded corpus and a
+// real UAC checkout run through exactly the same code: os.DirFS for one,
+// the unpacked archive for the other.
+func LoadFS(fsys fs.FS) ([]*Doc, map[string]error) {
 	var docs []*Doc
 	errs := map[string]error{}
-	filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+	fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".yaml") {
 			return nil
 		}
-		rel, rerr := filepath.Rel(root, p)
-		if rerr != nil {
-			rel = p
-		}
-		doc, perr := ParseFile(p, rel)
-		if perr != nil {
-			errs[rel] = perr
+		f, oerr := fsys.Open(p)
+		if oerr != nil {
+			errs[p] = oerr
 			return nil
 		}
+		doc, perr := Parse(f, p)
+		f.Close()
+		if perr != nil {
+			errs[p] = fmt.Errorf("%s: %w", p, perr)
+			return nil
+		}
+		doc.Source = p
 		docs = append(docs, doc)
 		return nil
 	})

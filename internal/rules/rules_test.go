@@ -1,13 +1,14 @@
 package rules
 
 import (
+	"io/fs"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"uacscan/internal/artifact"
 	"uacscan/internal/fsref"
-	"uacscan/internal/uacpath"
+	"uacscan/internal/uacdata"
 )
 
 func TestGlobSpansSlashLikeFind(t *testing.T) {
@@ -270,8 +271,7 @@ func TestSetSkipsUnreachableSubtrees(t *testing.T) {
 
 // The compiler has to survive the real corpus.
 func TestCompileEveryOfflineArtifact(t *testing.T) {
-	root := uacArtifactRoot(t)
-	docs, errs := artifact.LoadDir(root)
+	docs, errs := artifact.LoadFS(uacArtifacts(t))
 	if len(errs) > 0 {
 		t.Fatalf("corpus failed to parse: %v", errs)
 	}
@@ -317,13 +317,14 @@ func TestCompileEveryOfflineArtifact(t *testing.T) {
 	t.Logf("%d rules match /etc/passwd", rooted)
 }
 
-func uacArtifactRoot(t *testing.T) string {
+// uacArtifacts returns the corpus baked into the binary.
+func uacArtifacts(t *testing.T) fs.FS {
 	t.Helper()
-	d := uacpath.Artifacts()
-	if d == "" {
-		t.Skip("UAC artifact corpus not found; set UAC_ROOT")
+	f, err := uacdata.Artifacts()
+	if err != nil {
+		t.Fatalf("embedded artifact corpus unavailable: %v", err)
 	}
-	return d
+	return f
 }
 
 // UAC ships enable_find_atime: false, so a file whose only recent timestamp is
