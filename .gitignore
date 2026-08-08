@@ -1,0 +1,7 @@
+# built binaries
+/uacscan
+/uacdiff
+
+# harness working directories
+/work/
+*.out
