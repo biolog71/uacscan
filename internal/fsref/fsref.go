@@ -118,7 +118,7 @@ func (f *FileRef) fillStatx() error {
 	// dirfd goes through a variable: uintptr(-100) is rejected as a constant
 	// conversion, which is why the stdlib does the same dance.
 	dirfd := atFdCwd
-	_, _, e := syscall.Syscall6(sysStatx,
+	_, _, e := syscall.Syscall6(uintptr(sysStatx),
 		uintptr(dirfd), uintptr(unsafe.Pointer(p)),
 		uintptr(atSymlinkNofollow), uintptr(statxAll),
 		uintptr(unsafe.Pointer(&buf[0])), 0)

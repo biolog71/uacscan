@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 // Entry describes one spool file in the manifest.
@@ -89,7 +90,16 @@ type Store struct {
 	owners  map[string]string
 }
 
+// NewStore prepares an output tree.
+//
+// The directory must be absent or empty. Appending a second acquisition to an
+// existing one produces line-oriented outputs containing both while copied
+// files are selectively overwritten, and the manifest counts only what this run
+// wrote -- a mixture that looks like a single coherent collection and is not.
 func NewStore(root string) (*Store, error) {
+	if err := checkEmpty(root); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(root, 0755); err != nil {
 		return nil, err
 	}
@@ -99,6 +109,22 @@ func NewStore(root string) (*Store, error) {
 		kinds:   map[string]string{},
 		owners:  map[string]string{},
 	}, nil
+}
+
+// checkEmpty refuses a directory that already holds a collection.
+func checkEmpty(root string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if len(entries) > 0 {
+		return fmt.Errorf("output directory %s is not empty; "+
+			"a collection must not be mixed with an earlier one", root)
+	}
+	return nil
 }
 
 // Open returns the writer for an output file, creating it on first use. dir is
@@ -114,10 +140,18 @@ func (s *Store) Open(collector, kind, dir, name string) (*Writer, error) {
 	if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(full, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	// O_NOFOLLOW so that a symlink sitting where an output file should go
+	// cannot redirect results out of the collection directory. O_APPEND
+	// because several rules legitimately share one output_file within a run;
+	// across runs the caller is expected to supply a fresh directory, which is
+	// what NewStore enforces.
+	fd, err := syscall.Open(full,
+		syscall.O_CREAT|syscall.O_WRONLY|syscall.O_APPEND|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,
+		0644)
 	if err != nil {
-		return nil, err
+		return nil, &os.PathError{Op: "open", Path: full, Err: err}
 	}
+	f := os.NewFile(uintptr(fd), full)
 	w := &Writer{f: f, w: bufio.NewWriterSize(f, 64*1024), rel: rel}
 	s.writers[rel] = w
 	s.kinds[rel] = kind

@@ -46,6 +46,9 @@ type Walker struct {
 	// Progress, if set, is called once per directory entered.
 	Progress func(path string, files int64)
 
+	// Recorded, if set, reports how many per-file problems collectors recorded.
+	Recorded func() int64
+
 	rootDev  uint64
 	files    int64
 	dirs     int64
@@ -58,11 +61,19 @@ type Stats struct {
 	Files       int64
 	Dirs        int64
 	SkippedDirs int64
-	Errors      int64
+	// Errors counts traversal failures.
+	Errors int64
+	// Recorded counts per-file problems written to the errors spool, which are
+	// not traversal failures and would otherwise go unmentioned.
+	Recorded int64
 }
 
 func (w *Walker) Stats() Stats {
-	return Stats{Files: w.files, Dirs: w.dirs, SkippedDirs: w.skipped, Errors: w.errCount}
+	s := Stats{Files: w.files, Dirs: w.dirs, SkippedDirs: w.skipped, Errors: w.errCount}
+	if w.Recorded != nil {
+		s.Recorded = w.Recorded()
+	}
+	return s
 }
 
 type frame struct {

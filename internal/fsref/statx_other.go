@@ -1,7 +1,7 @@
-//go:build !linux || (!amd64 && !arm64)
+//go:build !linux
 
 package fsref
 
-// sysStatx == 0 means "no statx on this platform"; Resolve falls back to lstat
-// and simply reports no birth time and no immutable/append attributes.
+// statx is a Linux syscall. Everywhere else Resolve falls through to lstat,
+// which on Darwin and the BSDs also carries a birth time.
 const sysStatx = 0

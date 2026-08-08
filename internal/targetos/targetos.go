@@ -142,9 +142,13 @@ func Host() OS {
 // and belongs in the run log.
 //
 // An explicit override always wins. Collecting from / means the host is the
-// image. Otherwise the image is inspected, and if that is inconclusive the host
-// is assumed -- with the reason saying so, so nobody has to guess afterwards
-// why an artifact was skipped.
+// image. Otherwise the image is inspected, and if that is inconclusive the
+// result is Unknown -- never the examiner's own operating system.
+//
+// Assuming the host would be actively harmful: a partial macOS image examined
+// on a Linux workstation would have every macOS artifact filtered out, and the
+// collection would look complete. Unknown disables the filter instead, so an
+// unidentified image is over-collected rather than silently under-collected.
 func Resolve(override, mountPoint string) (OS, string, error) {
 	if override != "" {
 		if !Valid(override) {
@@ -158,7 +162,7 @@ func Resolve(override, mountPoint string) (OS, string, error) {
 	if got, evidence := Detect(mountPoint); got != Unknown {
 		return got, "detected from " + filepath.Join(mountPoint, evidence), nil
 	}
-	return Host(), "could not identify the image; assumed the host's -- pass -s to be sure", nil
+	return Unknown, "could not identify the image; collecting every artifact -- pass -s to narrow it", nil
 }
 
 // InvalidOSError reports an unusable -s value.

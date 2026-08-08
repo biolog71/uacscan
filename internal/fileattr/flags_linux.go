@@ -8,7 +8,11 @@ import (
 )
 
 // fsIocGetFlags is FS_IOC_GETFLAGS: _IOR('f', 1, long).
-const fsIocGetFlags = 0x80086601
+//
+// The size field of an ioctl number is sizeof(long), which is 4 on 32-bit and 8
+// on 64-bit. Hard-coding the 64-bit form makes the call fail with EINVAL on
+// linux/386 and linux/arm, so it is computed from the word size instead.
+const fsIocGetFlags = uintptr(0x80006601) | (uintptr(unsafe.Sizeof(int(0))) << 16)
 
 // GetFlags reads a file's attribute flags, the same value lsattr reports.
 //
@@ -26,7 +30,7 @@ func GetFlags(path string) (uint32, error) {
 
 	var flags int
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
-		uintptr(fd), uintptr(fsIocGetFlags), uintptr(unsafe.Pointer(&flags)))
+		uintptr(fd), fsIocGetFlags, uintptr(unsafe.Pointer(&flags)))
 	if errno != 0 {
 		return 0, errno
 	}

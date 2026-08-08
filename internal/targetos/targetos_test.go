@@ -139,18 +139,25 @@ func TestResolve(t *testing.T) {
 		t.Errorf("live: got %q, want %q (%v)", got, Host(), err)
 	}
 
-	// An unidentifiable tree falls back to the host and says so, rather than
-	// filtering everything out.
+	// An unidentifiable offline image must NOT be assumed to be the examiner's
+	// operating system. Doing so would filter out every macos artifact from a
+	// partial macOS image examined on Linux, and the collection would look
+	// complete. Unknown disables the filter instead.
 	empty := t.TempDir()
 	got, why, err = Resolve("", empty)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != Host() {
-		t.Errorf("fallback: got %q, want the host %q", got, Host())
+	if got != Unknown {
+		t.Errorf("unidentified image resolved to %q; it must be Unknown so that "+
+			"no artifact is filtered out on a guess", got)
 	}
 	if why == "" {
-		t.Error("the fallback must say it is a guess")
+		t.Error("the outcome must be explained")
+	}
+	// And Unknown really must disable filtering.
+	if !Supports([]string{"macos"}, got) {
+		t.Error("a macos artifact was filtered out for an unidentified image")
 	}
 
 	// A bad override is an error, not a silent default.

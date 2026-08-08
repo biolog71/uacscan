@@ -122,23 +122,29 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 	mountTable := mounts.Load().Under(mount)
 
 	accounts := passwd.Load(mount)
+	if osTarget == targetos.Unknown && verbose {
+		fmt.Fprintln(os.Stderr, "warning: the image could not be identified; no artifacts will be filtered by operating system")
+	}
 	if !accounts.Known() && verbose {
 		fmt.Fprintf(os.Stderr, "warning: no passwd file under %s; no_user/no_group rules will be skipped\n", mount)
 	}
 
 	env := &rules.Env{
-		MountPoint:    mount,
-		Now:           time.Now(),
-		OS:            osTarget,
-		StartDateDays: startDays,
-		EndDateDays:   endDays,
-		EnableMtime:   conf.EnableFindMtime,
-		EnableAtime:   conf.EnableFindAtime,
-		EnableCtime:   conf.EnableFindCtime,
-		HashAlgorithm: conf.HashAlgorithm,
-		Mounts:        mountTable,
-		UserHomes:     accounts.Homes,
-		OutputDir:     outDir,
+		MountPoint:         mount,
+		Now:                time.Now(),
+		OS:                 osTarget,
+		StartDateDays:      startDays,
+		EndDateDays:        endDays,
+		EnableMtime:        conf.EnableFindMtime,
+		EnableAtime:        conf.EnableFindAtime,
+		EnableCtime:        conf.EnableFindCtime,
+		HashAlgorithm:      conf.HashAlgorithm,
+		Mounts:             mountTable,
+		UserHomes:          accounts.Homes,
+		ShellUserHomes:     accounts.ShellHomes,
+		ExcludeNamePattern: conf.ExcludeNamePattern,
+		MaxDepth:           conf.MaxDepth,
+		OutputDir:          outDir,
 	}
 	if accounts.Known() {
 		env.UIDs, env.GIDs = accounts.UIDs, accounts.GIDs
@@ -218,6 +224,7 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 		Collectors:   cs,
 		ExcludePaths: excludeGlobs,
 		CrossDevice:  crossDev,
+		Recorded:     ctx.RecordedErrors,
 		OnError: func(path string, err error) {
 			ctx.RecordError(path, "walk", err)
 			if verbose {
@@ -249,6 +256,7 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 	fmt.Printf("files visited : %d\n", st.Files)
 	fmt.Printf("directories   : %d (%d skipped)\n", st.Dirs, st.SkippedDirs)
 	fmt.Printf("walk errors   : %d\n", st.Errors)
+	fmt.Printf("file errors   : %d (see uacscan/errors.txt)\n", st.Recorded)
 	fmt.Printf("elapsed       : %s", elapsed.Round(time.Millisecond))
 	if st.Files > 0 {
 		fmt.Printf("  (%.1f us/file)", float64(elapsed.Microseconds())/float64(st.Files))

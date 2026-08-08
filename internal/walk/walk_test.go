@@ -96,6 +96,7 @@ func setup(t *testing.T, artifactYAML string) *harness {
 		w: &Walker{
 			Root: root, Cache: cache, Broker: broker,
 			Set: rules.NewSet(compiled), Collectors: cs,
+			Recorded: ctx.RecordedErrors,
 		},
 	}
 }
@@ -632,5 +633,154 @@ artifacts:
 	h.run(t)
 	if _, err := os.Stat(filepath.Join(h.out, "[root]")); err == nil {
 		t.Error("collected files although no assignment was found")
+	}
+}
+
+// An unsupported algorithm name used to desync the algorithm list from the
+// hash list and panic with an index out of range.
+func TestUnsupportedHashAlgorithmDoesNotPanic(t *testing.T) {
+	h := setup(t, hashArtifact)
+	h.env.HashAlgorithm = []string{"bogus", "md5", "also-bogus", "sha1"}
+	h.run(t)
+
+	// The names it does understand still produce correct output.
+	for _, algo := range []string{"md5", "sha1"} {
+		lines := h.lines(t, "hash/hashes."+algo)
+		if len(lines) != 3 {
+			t.Errorf("%s: got %d hashes, want 3", algo, len(lines))
+		}
+		for _, l := range lines {
+			parts := strings.SplitN(l, "  ", 2)
+			if len(parts) != 2 || len(parts[0]) == 0 {
+				t.Errorf("%s: malformed line %q", algo, l)
+			}
+		}
+	}
+	// And the ones it does not are simply absent.
+	for _, algo := range []string{"bogus", "also-bogus"} {
+		if _, err := os.Stat(filepath.Join(h.out, "hash/hashes."+algo)); err == nil {
+			t.Errorf("produced output for the unsupported algorithm %q", algo)
+		}
+	}
+}
+
+// An unwritable output must stop the scan, not be logged as though the evidence
+// were at fault. A partial acquisition that exits zero is the worst outcome
+// this tool can have.
+func TestUnwritableOutputAbortsTheScan(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permissions do not apply")
+	}
+	h := setup(t, `version: 1.0
+output_directory: /files
+artifacts:
+  -
+    collector: file
+    path: /etc
+    file_type: [f]
+    ignore_date_range: true
+`)
+	// Make the collected-files tree unwritable after the store is set up.
+	root := filepath.Join(h.out, "[root]")
+	if err := os.MkdirAll(root, 0555); err != nil {
+		t.Fatal(err)
+	}
+
+	err := h.w.Walk()
+	if err == nil {
+		t.Fatal("the walk reported success although no file could be written")
+	}
+	if !strings.Contains(err.Error(), "output failed") {
+		t.Errorf("error does not identify an output failure: %v", err)
+	}
+}
+
+// A file that cannot be read is the image's problem, and must not stop
+// anything -- the counterpart to the test above.
+func TestUnreadableSourceDoesNotAbortTheScan(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permissions do not apply")
+	}
+	h := setup(t, `version: 1.0
+output_directory: /files
+artifacts:
+  -
+    collector: file
+    path: /etc
+    file_type: [f]
+    ignore_date_range: true
+`)
+	if err := os.Chmod(filepath.Join(h.root, "etc/passwd"), 0000); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.w.Walk(); err != nil {
+		t.Fatalf("an unreadable source file aborted the scan: %v", err)
+	}
+	h.store.Close()
+
+	if st := h.w.Stats(); st.Recorded == 0 {
+		t.Error("the unreadable file was not counted in the run statistics")
+	}
+	if _, err := os.Stat(filepath.Join(h.out, "[root]/etc/hostname")); err != nil {
+		t.Errorf("collection stopped after the unreadable file: %v", err)
+	}
+}
+
+// The critical containment case, end to end: a hostile image cannot use a
+// HISTFILE assignment to make the scan read or write outside the roots.
+func TestTwoPhaseCannotEscapeTheImage(t *testing.T) {
+	h := setup(t, `version: 1.0
+output_directory: /files
+artifacts:
+  -
+    collector: command
+    command: grep -E "HISTFILE=.*" %user_home%/.evilrc | sed -e 's|.*HISTFILE=||' -e 's|^~/|%user_home%/|'
+    output_directory: /%temp_directory%/files/shell
+    output_file: evil.txt
+  -
+    collector: file
+    path: /%temp_directory%/files/shell/evil.txt
+    is_file_list: true
+`)
+	// A file outside the image that must never be read.
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "host_secret")
+	if err := os.WriteFile(secret, []byte("HOST SECRET"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// The image points at it two ways: by traversal, and through a symlink.
+	if err := os.Symlink(outside, filepath.Join(h.root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	rc := "HISTFILE=/../../../../../../" + strings.TrimPrefix(secret, "/") + "\n" +
+		"HISTFILE=/escape/host_secret\n"
+	if err := os.WriteFile(filepath.Join(h.root, "home/alice/.evilrc"), []byte(rc), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	h.run(t)
+
+	// Nothing outside the image may have been collected.
+	var leaked []string
+	filepath.WalkDir(h.out, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr == nil && strings.Contains(string(b), "HOST SECRET") {
+			leaked = append(leaked, p)
+		}
+		return nil
+	})
+	if len(leaked) > 0 {
+		t.Fatalf("host data outside the image was collected into %v", leaked)
+	}
+
+	// And nothing may have been written outside the output directory.
+	if _, err := os.Stat(filepath.Join(outside, "[root]")); err == nil {
+		t.Fatal("wrote outside the output directory")
+	}
+	if b, err := os.ReadFile(secret); err != nil || string(b) != "HOST SECRET" {
+		t.Fatalf("the host file was modified: %q %v", b, err)
 	}
 }

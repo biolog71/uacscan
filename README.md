@@ -342,6 +342,29 @@ measurement: setting individual flags on real files and reading back where
 against the installed `lsattr` rather than trusting the table. A different
 e2fsprogs release may add columns and shift the tail.
 
+## Handling hostile images
+
+An image is evidence, not input to be trusted. Two places take data that the
+image itself controls, and both are contained.
+
+A `HISTFILE` value is a string out of a file's contents. It is normalised
+first, so `/` means the *image* root and a leading `..` resolves back inside
+rather than climbing out. That alone is not enough — the kernel follows
+symlinks in intermediate components, so an image containing `/logs -> /` would
+turn `<mount>/logs/etc/shadow` into the examiner's own file — so every
+directory leading to the target is checked and a symlinked one is refused. The
+copy destination is built from the same string and gets the same containment
+check, and output files are created with `O_NOFOLLOW` so a planted symlink
+cannot redirect collected evidence elsewhere.
+
+Output failures are separated from evidence failures. A source file that cannot
+be read is routine — a bad sector, a permission denial — and is recorded while
+the scan continues. A failure to *write* is not: the disk is full, the
+destination is unwritable. Those abort the run, because a partial acquisition
+that exits zero and looks complete is the worst outcome this tool can have. The
+run prints both counts, and the output directory must be empty, so one
+collection can never be appended to another.
+
 ## Known limits
 
 - **`exclude_file_system` is Linux-only.** It reads `/proc/self/mounts`; other
@@ -350,6 +373,12 @@ e2fsprogs release may add columns and shift the tail.
   pseudo filesystems and the device-boundary check already stops the walk.
 - **Only `linux/amd64` is verified.** Everything else is compile-checked; the
   differential harness has to run on the platform under test.
+- **Containment is checked, not pinned.** The symlink check on ancestor
+  directories is an `lstat` rather than a descent through held descriptors, so
+  it is theoretically racy against something mutating the image mid-scan. A
+  forensic image is static and should be mounted read-only; `openat2` with
+  `RESOLVE_BENEATH` would close the gap on recent Linux at the cost of working
+  nowhere else.
 - **`command` collectors are out of scope** by design — 661 entries that
   execute on a live system, which no filesystem walk can stand in for. The
   HISTFILE extraction above is the one exception, because it only reads files.

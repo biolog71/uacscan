@@ -34,6 +34,33 @@ const DefaultBufferLimit = 4 << 20
 // moved on. Failing loudly beats reading whatever file inherited the fd.
 var ErrExpired = errors.New("content: view used after the walker moved to the next file")
 
+// FatalError marks a failure that must stop the scan.
+//
+// The two kinds of failure are not alike. Failing to *read* a source file is
+// routine on a real image -- a bad sector, a permission denial -- and must not
+// abort an acquisition. Failing to *write* output is not routine: the disk is
+// full, the destination is unwritable, the spool cannot be appended to. Left as
+// a recorded error, that produces a partial acquisition that exits zero and
+// looks complete, which is the worst outcome this tool can have.
+type FatalError struct{ Err error }
+
+func (e *FatalError) Error() string { return "output failed: " + e.Err.Error() }
+func (e *FatalError) Unwrap() error { return e.Err }
+
+// Fatal wraps an error as unrecoverable.
+func Fatal(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &FatalError{Err: err}
+}
+
+// IsFatal reports whether an error must stop the scan.
+func IsFatal(err error) bool {
+	var f *FatalError
+	return errors.As(err, &f)
+}
+
 // Content is the read-only, offset-free handle collectors receive.
 type Content interface {
 	// Path is the image-relative path, for error messages and records.
@@ -144,6 +171,11 @@ func (b *Broker) Run(f *fsref.FileRef) error {
 
 	for _, c := range b.pending {
 		if err := c.Fn(view); err != nil {
+			// A consumer that could not write its output has not merely failed
+			// on this file; the acquisition is compromised and must stop.
+			if IsFatal(err) {
+				return fmt.Errorf("%s: %w", f.Path, err)
+			}
 			b.reportErr(f.Path, c.Name, err)
 		}
 	}

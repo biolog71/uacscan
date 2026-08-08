@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"uacscan/internal/content"
 	"uacscan/internal/fileattr"
@@ -183,32 +185,45 @@ func (c *hashCollector) algos() []string {
 	return c.algorithms
 }
 
+// digester pairs an algorithm name with its hash, so that skipping an
+// unsupported name cannot leave the two lists at different lengths.
+type digester struct {
+	name string
+	h    hash.Hash
+}
+
+func newDigest(name string) (hash.Hash, bool) {
+	switch name {
+	case "md5":
+		return md5.New(), true
+	case "sha1":
+		return sha1.New(), true
+	case "sha256":
+		return sha256.New(), true
+	}
+	return nil, false
+}
+
 func (c *hashCollector) digest(f *fsref.FileRef, ct content.Content) error {
-	algos := c.algos()
-	hashes := make([]hash.Hash, 0, len(algos))
-	sinks := make([]io.Writer, 0, len(algos))
-	for _, a := range algos {
-		var h hash.Hash
-		switch a {
-		case "md5":
-			h = md5.New()
-		case "sha1":
-			h = sha1.New()
-		case "sha256":
-			h = sha256.New()
-		default:
+	var (
+		digests []digester
+		sinks   []io.Writer
+	)
+	for _, a := range c.algos() {
+		h, ok := newDigest(a)
+		if !ok {
 			continue
 		}
-		hashes = append(hashes, h)
+		digests = append(digests, digester{name: a, h: h})
 		sinks = append(sinks, h)
 	}
-	if len(hashes) == 0 {
+	if len(digests) == 0 {
 		return nil
 	}
 	// One pass over the bytes feeds every digest.
 	if buf, ok := ct.Bytes(); ok {
-		for _, h := range hashes {
-			h.Write(buf)
+		for _, d := range digests {
+			d.h.Write(buf)
 		}
 	} else if _, err := io.Copy(io.MultiWriter(sinks...), ct.Reader()); err != nil {
 		return err
@@ -221,20 +236,20 @@ func (c *hashCollector) digest(f *fsref.FileRef, ct content.Content) error {
 	if name == "" {
 		name = "hashes"
 	}
-	for i, a := range algos {
-		w, ok := c.writers[a]
+	for _, d := range digests {
+		w, ok := c.writers[d.name]
 		if !ok {
 			var err error
-			w, err = c.ctx.Store.Open(c.rule.ID, "hashes", c.rule.OutputDir, name+"."+a)
+			w, err = c.ctx.Store.Open(c.rule.ID, "hashes", c.rule.OutputDir, name+"."+d.name)
 			if err != nil {
-				return err
+				return content.Fatal(err)
 			}
-			c.writers[a] = w
+			c.writers[d.name] = w
 		}
 		// Two spaces before the path, matching md5sum/sha1sum output, which is
 		// what UAC's hash collector produces.
-		if err := w.Writef("%s  %s", hex.EncodeToString(hashes[i].Sum(nil)), f.Path); err != nil {
-			return err
+		if err := w.Writef("%s  %s", hex.EncodeToString(d.h.Sum(nil)), f.Path); err != nil {
+			return content.Fatal(err)
 		}
 	}
 	return nil
@@ -302,27 +317,42 @@ func (c *fileCollector) InspectFile(path string) error {
 }
 
 func (c *fileCollector) copy(f *fsref.FileRef, ct content.Content) error {
-	dst := filepath.Join(c.ctx.OutputRoot, "[root]", strings.TrimPrefix(f.Path, "/"))
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		return err
-	}
-	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	// The destination is built from the same image-controlled path as the
+	// source, so it needs the same containment check.
+	dst, err := fsref.DestinationUnder(filepath.Join(c.ctx.OutputRoot, "[root]"), f.Path)
 	if err != nil {
 		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return content.Fatal(err)
+	}
+	// O_NOFOLLOW: a symlink sitting at the destination must not redirect
+	// collected evidence somewhere else.
+	out, err := fsref.CreateNoFollow(dst, 0644)
+	if err != nil {
+		return content.Fatal(err)
 	}
 	defer out.Close()
 	if buf, ok := ct.Bytes(); ok {
 		if _, err := out.Write(buf); err != nil {
-			return err
+			return content.Fatal(err)
 		}
 	} else if _, err := io.Copy(out, ct.Reader()); err != nil {
-		return err
+		// A copy can fail either end. A read error is the source's problem and
+		// is recoverable; anything else means the destination.
+		if isSourceReadError(err) {
+			return err
+		}
+		return content.Fatal(err)
+	}
+	if err := out.Close(); err != nil {
+		return content.Fatal(err)
 	}
 	w, err := c.writer("copies", "file_collector.txt")
 	if err != nil {
-		return err
+		return content.Fatal(err)
 	}
-	return w.WriteLine(f.Path)
+	return content.Fatal(w.WriteLine(f.Path))
 }
 
 // Finish collects the second phase of a two-phase artifact: the paths a list
@@ -336,8 +366,10 @@ func (c *fileCollector) Finish() error {
 		return nil
 	}
 	for _, p := range c.ctx.List(c.rule.ListKey) {
-		real := fsref.Join(c.ctx.Env.MountPoint, p)
-		f, err := fsref.Resolve(real, p, strings.Count(strings.Trim(p, "/"), "/"))
+		// The path came out of a file's contents, so it is only as trustworthy
+		// as the image. ResolveBeneath refuses one that would leave the mount,
+		// including by way of a symlinked directory component.
+		f, err := fsref.ResolveBeneath(c.ctx.Env.MountPoint, p)
 		if err != nil {
 			// A shell configured a history file that does not exist. Worth
 			// recording -- it is evidence about configuration -- but not an
@@ -445,4 +477,18 @@ func (c *listCollector) ScanResults() (any, error) {
 			}
 		}
 	}, nil
+}
+
+// isSourceReadError reports whether a copy failure came from reading the
+// evidence rather than from writing the output.
+//
+// The distinction decides whether the scan continues. A bad sector or an
+// unreadable file is the image's problem and is recorded; anything else during
+// a copy means the destination could not be written, which compromises the
+// acquisition and must stop it.
+func isSourceReadError(err error) bool {
+	return errors.Is(err, syscall.EIO) ||
+		errors.Is(err, syscall.EACCES) ||
+		errors.Is(err, syscall.EPERM) ||
+		errors.Is(err, content.ErrExpired)
 }

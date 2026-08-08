@@ -16,6 +16,7 @@ package collector
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 
@@ -81,9 +82,13 @@ type Context struct {
 	listMu sync.Mutex
 	lists  map[string][]string
 
-	errOnce sync.Once
-	errW    *spool.Writer
-	errErr  error
+	errOnce  sync.Once
+	warnOnce sync.Once
+	errW     *spool.Writer
+	errErr   error
+
+	errMu    sync.Mutex
+	errCount int64
 }
 
 // AddToList records a path discovered by a list-producing rule.
@@ -113,14 +118,38 @@ func (c *Context) List(key string) []string {
 
 // RecordError writes a per-file problem to the errors spool. It deliberately
 // returns nothing: callers must not treat a bad file as a reason to stop.
+//
+// The count is kept so the run can report how many problems it papered over.
+// An acquisition that quietly skipped ten thousand files is not the same as a
+// clean one, and the difference has to be visible without reading the spool.
 func (c *Context) RecordError(path, stage string, err error) {
+	c.errMu.Lock()
+	c.errCount++
+	c.errMu.Unlock()
+
 	c.errOnce.Do(func() {
 		c.errW, c.errErr = c.Store.Open("uacscan", "errors", "/uacscan", "errors.txt")
 	})
 	if c.errW == nil {
+		// The errors spool itself could not be opened. Say so on stderr rather
+		// than losing the record silently.
+		c.warnOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "uacscan: cannot write the errors log: %v\n", c.errErr)
+		})
 		return
 	}
-	_ = c.errW.Writef("%s|%s|%s", path, stage, err)
+	if werr := c.errW.Writef("%s|%s|%s", path, stage, err); werr != nil {
+		c.warnOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "uacscan: cannot write the errors log: %v\n", werr)
+		})
+	}
+}
+
+// RecordedErrors returns how many per-file problems were recorded.
+func (c *Context) RecordedErrors() int64 {
+	c.errMu.Lock()
+	defer c.errMu.Unlock()
+	return c.errCount
 }
 
 // ref returns the already-resolved record for path. A cache miss is not an

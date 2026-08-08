@@ -3,6 +3,8 @@ package rules
 import (
 	"regexp"
 	"strings"
+
+	"uacscan/internal/fsref"
 )
 
 // UAC determines where a shell keeps its history by grepping the shell's rc
@@ -116,7 +118,14 @@ func cleanAssignment(v string) string {
 // as a relative path and fail. Rather than reproduce that failure, such values
 // are reported as unresolvable and recorded, which at least leaves a trace that
 // something was found and not collected.
-func ResolveHistfile(value, home string) (path string, ok bool) {
+//
+// The value comes from inside the image and is therefore attacker-controlled on
+// a hostile one. It is normalised before being returned, so that "/../../etc/
+// shadow" means /etc/shadow inside the image rather than climbing out of it.
+// Containment of the eventual filesystem access is enforced separately, by
+// fsref.ResolveBeneath, because cleaning cannot see intermediate symlinks.
+func ResolveHistfile(value, home string) (string, bool) {
+	var raw string
 	switch {
 	case value == "":
 		return "", false
@@ -124,14 +133,17 @@ func ResolveHistfile(value, home string) (path string, ok bool) {
 		if home == "" {
 			return "", false
 		}
-		return strings.TrimSuffix(home, "/") + value[1:], true
+		raw = strings.TrimSuffix(home, "/") + value[1:]
 	case strings.HasPrefix(value, "/"):
-		return value, true
-	case strings.HasPrefix(value, "$"):
-		// An unexpanded variable; the shell would have resolved it against an
-		// environment this walk does not have.
-		return "", false
+		raw = value
 	default:
+		// A relative path, or an unexpanded variable: the shell would have
+		// resolved it against state this walk does not have.
 		return "", false
 	}
+	cleaned, err := fsref.CleanImagePath(raw)
+	if err != nil {
+		return "", false
+	}
+	return cleaned, true
 }

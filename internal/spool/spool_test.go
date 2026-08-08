@@ -108,26 +108,109 @@ func TestSanitizeName(t *testing.T) {
 	}
 }
 
-func TestContentSurvivesReopen(t *testing.T) {
+// Within one run, many lines accumulate and survive the flush boundary.
+func TestLargeOutputSurvivesFlushing(t *testing.T) {
 	root := t.TempDir()
-	s, _ := NewStore(root)
-	w, _ := s.Open("r", "paths", "/d", "f.txt")
-	for i := 0; i < 1000; i++ {
-		w.WriteLine("line")
+	s, err := NewStore(root)
+	if err != nil {
+		t.Fatal(err)
 	}
-	s.Close()
+	w, err := s.Open("r", "paths", "/d", "f.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5000; i++ {
+		if err := w.WriteLine("a line long enough to cross the 64 KiB buffer several times over"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
 
-	// Reopening the same store must append, not truncate.
-	s2, _ := NewStore(root)
-	w2, _ := s2.Open("r", "paths", "/d", "f.txt")
-	w2.WriteLine("appended")
-	s2.Close()
+	n := 0
+	for line, err := range Lines(filepath.Join(root, "d/f.txt")) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if line == "" {
+			t.Fatal("a line was truncated at a flush boundary")
+		}
+		n++
+	}
+	if n != 5000 {
+		t.Errorf("got %d lines, want 5000", n)
+	}
+}
+
+// A second run must not append to the first. Reopening the same root is
+// refused outright, which is what keeps two acquisitions from being mixed.
+func TestReopeningACollectionIsRefused(t *testing.T) {
+	root := t.TempDir()
+	s, err := NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, _ := s.Open("r", "paths", "/d", "f.txt")
+	w.WriteLine("first run")
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewStore(root); err == nil {
+		t.Fatal("a second collection was allowed to append to the first")
+	}
 
 	n := 0
 	for range Lines(filepath.Join(root, "d/f.txt")) {
 		n++
 	}
-	if n != 1001 {
-		t.Errorf("got %d lines, want 1001", n)
+	if n != 1 {
+		t.Errorf("the first run's output changed: %d lines", n)
+	}
+}
+
+// Appending a second acquisition to an existing one produces line-oriented
+// outputs holding both while copied files are selectively overwritten -- a
+// mixture that looks like one coherent collection and is not.
+func TestNewStoreRefusesANonEmptyDirectory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "leftover.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(root); err == nil {
+		t.Fatal("accepted a directory that already contains a collection")
+	}
+
+	// Absent and empty are both fine.
+	if _, err := NewStore(filepath.Join(t.TempDir(), "fresh")); err != nil {
+		t.Errorf("rejected a new directory: %v", err)
+	}
+	if _, err := NewStore(t.TempDir()); err != nil {
+		t.Errorf("rejected an empty directory: %v", err)
+	}
+}
+
+// A symlink where an output file should go must not redirect results out of the
+// collection directory.
+func TestOpenRefusesASymlinkedOutputFile(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "elsewhere.txt")
+	if err := os.WriteFile(outside, []byte("original"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "system"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "system/suid.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &Store{Root: root, writers: map[string]*Writer{}, kinds: map[string]string{}, owners: map[string]string{}}
+	if _, err := s.Open("r", "paths", "/system", "suid.txt"); err == nil {
+		t.Fatal("opened through a symlink in the output tree")
+	}
+	if b, err := os.ReadFile(outside); err != nil || string(b) != "original" {
+		t.Errorf("the symlink target was written: %q %v", b, err)
 	}
 }

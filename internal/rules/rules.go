@@ -69,6 +69,15 @@ type Env struct {
 	// defaults to md5 and sha1.
 	HashAlgorithm []string
 
+	// ExcludeNamePattern and MaxDepth come from uac.conf and apply to every
+	// rule, on top of whatever an individual artifact asks for.
+	ExcludeNamePattern []string
+	MaxDepth           int
+
+	// ShellUserHomes is the subset of UserHomes belonging to accounts with a
+	// login shell, used by artifacts declaring exclude_nologin_users.
+	ShellUserHomes []string
+
 	// Account databases read from the *image*, not the host. This is what makes
 	// no_user/no_group correct offline, where find(1) would consult the
 	// examiner's own passwd file and report nonsense.
@@ -309,13 +318,23 @@ func inDateRange(f *fsref.FileRef, env *Env) bool {
 	if env.StartDateDays == 0 && env.EndDateDays == 0 {
 		return true
 	}
-	day := 24 * time.Hour
-	test := func(t time.Time) bool {
+	// find does not compare elapsed time directly: it divides the age by 24
+	// hours and truncates, then compares whole days. So -mtime -N matches when
+	// that count is < N, and +N when it is > N -- meaning +N only starts
+	// matching at N+1 days, a day later than a naive comparison would.
+	days := func(t time.Time) int64 {
 		age := env.Now.Sub(t)
-		if env.StartDateDays > 0 && age >= time.Duration(env.StartDateDays)*day {
+		if age < 0 {
+			return 0 // a timestamp in the future counts as zero days old
+		}
+		return int64(age / (24 * time.Hour))
+	}
+	test := func(t time.Time) bool {
+		d := days(t)
+		if env.StartDateDays > 0 && d >= int64(env.StartDateDays) {
 			return false
 		}
-		if env.EndDateDays > 0 && age <= time.Duration(env.EndDateDays)*day {
+		if env.EndDateDays > 0 && d <= int64(env.EndDateDays) {
 			return false
 		}
 		return true
@@ -372,12 +391,20 @@ func Compile(e artifact.Entry, doc *artifact.Doc, env *Env) (*Rule, error) {
 		return r, nil
 	}
 
+	// exclude_nologin_users narrows %user_home% to accounts that can actually
+	// log in, which is what keeps a default collection from trawling every
+	// service account's home directory.
+	homes := env.UserHomes
+	if e.ExcludeNologinUsers {
+		homes = env.ShellUserHomes
+	}
+
 	needsUserHome := false
 	for _, p := range e.Path {
 		if strings.Contains(p, "%user_home%") {
 			needsUserHome = true
 		}
-		for _, expanded := range expandVars(p, env) {
+		for _, expanded := range expandVarsWithHomes(p, env, homes) {
 			r.anchors = append(r.anchors, anchor{
 				glob:  CompileGlob(expanded),
 				depth: strings.Count(expanded, "/"),
@@ -397,7 +424,8 @@ func Compile(e artifact.Entry, doc *artifact.Doc, env *Env) (*Rule, error) {
 
 	r.pathPatterns = compileGlobs(e.PathPattern)
 	r.namePatterns = compileGlobs(e.NamePattern)
-	r.excludeName = compileGlobs(e.ExcludeNamePattern)
+	r.excludeName = compileGlobs(append(append([]string(nil), e.ExcludeNamePattern...),
+		env.ExcludeNamePattern...))
 
 	// exclude_file_system names filesystem types; the walk needs paths. Resolve
 	// them through the mount table and fold them into the path exclusions, so
@@ -427,6 +455,10 @@ func Compile(e artifact.Entry, doc *artifact.Doc, env *Env) (*Rule, error) {
 	r.minSize, r.hasMinSize = e.MinFileSize, e.HasMinFileSize
 	r.maxSize, r.hasMaxSize = e.MaxFileSize, e.HasMaxFileSize
 	r.maxDepth, r.hasMaxDepth = e.MaxDepth, e.HasMaxDepth
+	// A configured max_depth caps every rule; the tighter of the two wins.
+	if env.MaxDepth > 0 && (!r.hasMaxDepth || env.MaxDepth < r.maxDepth) {
+		r.maxDepth, r.hasMaxDepth = env.MaxDepth, true
+	}
 	return r, nil
 }
 
@@ -499,12 +531,16 @@ func compileGlobs(pats []string) []Glob {
 // fans one entry out into one anchor per home directory found in the image's
 // passwd file.
 func expandVars(p string, env *Env) []string {
+	return expandVarsWithHomes(p, env, env.UserHomes)
+}
+
+func expandVarsWithHomes(p string, env *Env, homes []string) []string {
 	if !strings.Contains(p, "%") {
 		return []string{p}
 	}
 	if strings.Contains(p, "%user_home%") {
-		out := make([]string, 0, len(env.UserHomes))
-		for _, h := range env.UserHomes {
+		out := make([]string, 0, len(homes))
+		for _, h := range homes {
 			out = append(out, expandSimple(strings.ReplaceAll(p, "%user_home%", h), env))
 		}
 		return out

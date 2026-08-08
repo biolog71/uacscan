@@ -497,3 +497,130 @@ func TestCorpusNarrowsPerOperatingSystem(t *testing.T) {
 		t.Error("linux and macos produced identical rule counts; supported_os is not filtering")
 	}
 }
+
+// find divides the age by 24 hours and truncates, then compares whole days, so
+// -mtime +N only starts matching at N+1 days. Comparing elapsed time directly
+// would make the range a day too permissive at that end.
+func TestDateRangeUsesWholeDaysLikeFind(t *testing.T) {
+	now := time.Now()
+	r := &Rule{anchors: []anchor{{glob: CompileGlob("/")}}}
+	env := &Env{Now: now, EndDateDays: 7, EnableMtime: true, EnableCtime: true}
+
+	at := func(age time.Duration) *fsref.FileRef {
+		ts := now.Add(-age)
+		return &fsref.FileRef{Path: "/f", Name: "f", RawMode: 0100644, Mtime: ts, Ctime: ts, Atime: ts}
+	}
+	day := 24 * time.Hour
+	cases := []struct {
+		age   time.Duration
+		match bool
+		why   string
+	}{
+		{6 * day, false, "inside the range"},
+		{7*day + time.Hour, false, "day count is exactly 7, find needs > 7"},
+		{7*day + 23*time.Hour, false, "still day 7"},
+		{8 * day, true, "day count reaches 8"},
+		{30 * day, true, "well beyond"},
+	}
+	for _, tc := range cases {
+		if got := r.Match(at(tc.age), env); got != tc.match {
+			t.Errorf("age %v: matched=%v, want %v (%s)", tc.age, got, tc.match, tc.why)
+		}
+	}
+}
+
+func TestStartDateRangeUsesWholeDays(t *testing.T) {
+	now := time.Now()
+	r := &Rule{anchors: []anchor{{glob: CompileGlob("/")}}}
+	env := &Env{Now: now, StartDateDays: 7, EnableMtime: true, EnableCtime: true}
+	at := func(age time.Duration) *fsref.FileRef {
+		ts := now.Add(-age)
+		return &fsref.FileRef{Path: "/f", Name: "f", RawMode: 0100644, Mtime: ts, Ctime: ts, Atime: ts}
+	}
+	day := 24 * time.Hour
+	// -mtime -7 matches while the whole-day count is below 7.
+	if !r.Match(at(6*day+23*time.Hour), env) {
+		t.Error("day 6 should be inside -mtime -7")
+	}
+	if r.Match(at(7*day), env) {
+		t.Error("day 7 should be outside -mtime -7")
+	}
+}
+
+func TestGlobalConfigExclusionsApplyToEveryRule(t *testing.T) {
+	env := &Env{
+		Now:                time.Now(),
+		ExcludeNamePattern: []string{"*.tmp"},
+		MaxDepth:           2,
+	}
+	e := artifact.Entry{Collector: "file", Path: []string{"/var"}}
+	r, err := Compile(e, &artifact.Doc{}, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Excluded("/var/x.tmp", "x.tmp") {
+		t.Error("the configured exclude_name_pattern was ignored")
+	}
+	if !r.hasMaxDepth || r.maxDepth != 2 {
+		t.Errorf("the configured max_depth was ignored: hasMaxDepth=%v maxDepth=%d",
+			r.hasMaxDepth, r.maxDepth)
+	}
+	// An artifact asking for something tighter keeps its own limit.
+	e2 := artifact.Entry{Collector: "file", Path: []string{"/var"}, MaxDepth: 1, HasMaxDepth: true}
+	r2, _ := Compile(e2, &artifact.Doc{}, env)
+	if r2.maxDepth != 1 {
+		t.Errorf("the tighter artifact max_depth was overridden: %d", r2.maxDepth)
+	}
+}
+
+// exclude_nologin_users must narrow %user_home% to accounts that can log in,
+// or a default collection trawls every service account's home directory.
+func TestExcludeNologinUsersNarrowsHomes(t *testing.T) {
+	env := &Env{
+		Now:            time.Now(),
+		UserHomes:      []string{"/root", "/home/alice", "/usr/sbin"},
+		ShellUserHomes: []string{"/root", "/home/alice"},
+	}
+	doc := &artifact.Doc{}
+
+	all := artifact.Entry{Collector: "file", Path: []string{"%user_home%/.ssh"}}
+	r, err := Compile(all, doc, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.anchors) != 3 {
+		t.Errorf("without the flag, got %d anchors, want 3", len(r.anchors))
+	}
+
+	narrowed := artifact.Entry{
+		Collector: "file", Path: []string{"%user_home%/.ssh"},
+		ExcludeNologinUsers: true,
+	}
+	r2, err := Compile(narrowed, doc, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r2.anchors) != 2 {
+		t.Errorf("with exclude_nologin_users, got %d anchors, want 2", len(r2.anchors))
+	}
+	f := &fsref.FileRef{Path: "/usr/sbin/.ssh", Name: ".ssh", RawMode: 040755}
+	if r2.Match(f, env) {
+		t.Error("a service account's home was still collected")
+	}
+}
+
+func TestResolveHistfileNormalisesTraversal(t *testing.T) {
+	// The value comes from inside the image, so "/" is the image root and a
+	// leading ".." cannot climb out of it.
+	got, ok := ResolveHistfile("/../../../../etc/shadow", "/home/alice")
+	if !ok || got != "/etc/shadow" {
+		t.Errorf("got (%q, %v), want (/etc/shadow, true)", got, ok)
+	}
+	got, ok = ResolveHistfile("~/../../../../etc/shadow", "/home/alice")
+	if !ok || got != "/etc/shadow" {
+		t.Errorf("tilde form got (%q, %v), want (/etc/shadow, true)", got, ok)
+	}
+	if _, ok := ResolveHistfile("relative", "/home/alice"); ok {
+		t.Error("a relative value was accepted")
+	}
+}
