@@ -9,9 +9,10 @@
 // Unlike uacdata this really does unpack onto disk, because the harness has to
 // execute ./uac: you cannot exec a script out of an in-memory filesystem.
 //
-// Regenerate after updating the UAC checkout:
+// Regenerate after updating the UAC checkout. This archive comes first, because
+// internal/uacdata's is derived from it:
 //
-//	go generate ./test/uacfull
+//	go generate ./test/uacfull ./internal/uacdata
 package uacfull
 
 import (
@@ -28,7 +29,7 @@ import (
 	"sync"
 )
 
-//go:generate go run ../../internal/uacdata/gen -uac ../../../uac -out uac-full.tar.gz -mode full
+//go:generate go run ../../internal/uacdata/gen -mode full -uac ../../../uac -out uac-full.tar.gz
 
 //go:embed uac-full.tar.gz
 var archive []byte

@@ -178,3 +178,43 @@ func TestExtractRefusesPathTraversal(t *testing.T) {
 		t.Error("extraction wrote outside the target directory")
 	}
 }
+
+// The archive must contain UAC and nothing else.
+//
+// Packing the checkout by walking it once picked up .claude/settings.local.json
+// -- local tool state that is not part of UAC, changes as you work, and so made
+// the archive non-reproducible and put local paths into the repository. The
+// generator now takes its file list from git. This asserts the result.
+func TestArchiveContainsOnlyUAC(t *testing.T) {
+	dir := t.TempDir()
+	if err := Extract(dir); err != nil {
+		t.Fatal(err)
+	}
+	unwanted := []string{".claude", ".vscode", ".idea", ".git"}
+	err := filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, rerr := filepath.Rel(dir, p)
+		if rerr != nil {
+			return nil
+		}
+		top := strings.SplitN(filepath.ToSlash(rel), "/", 2)[0]
+		for _, u := range unwanted {
+			if top == u {
+				t.Errorf("archive contains %s, which is not part of UAC", rel)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// And the things that make it recognisably UAC are present.
+	for _, want := range []string{"uac", "lib", "bin", "artifacts", "config", "profiles"} {
+		if _, err := os.Stat(filepath.Join(dir, want)); err != nil {
+			t.Errorf("archive is missing %s: %v", want, err)
+		}
+	}
+}

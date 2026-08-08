@@ -7,9 +7,11 @@
 // there is no reason to: the whole corpus is smaller than a single collected
 // log file.
 //
-// Regenerate after updating the UAC checkout:
+// This archive is carved out of the full one the harness uses, not packed from
+// the checkout a second time, so the two cannot disagree about what UAC 3.3.0
+// contains. Regenerate in this order:
 //
-//	go generate ./internal/uacdata
+//	go generate ./test/uacfull ./internal/uacdata
 package uacdata
 
 import (
@@ -28,7 +30,7 @@ import (
 	"time"
 )
 
-//go:generate go run ./gen -uac ../../../uac -out uac.tar.gz
+//go:generate go run ./gen -mode data -from ../../test/uacfull/uac-full.tar.gz -out uac.tar.gz
 
 //go:embed uac.tar.gz
 var archive []byte
