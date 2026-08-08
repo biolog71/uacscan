@@ -16,6 +16,7 @@ package collector
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 
 	"uacscan/internal/content"
@@ -53,6 +54,14 @@ type Flusher interface {
 	Flush() error
 }
 
+// Finisher is an optional interface for collectors whose work cannot happen
+// during the walk. The walker calls Finish once, after the traversal, which is
+// what makes the two-phase artifacts possible: a shell history file named
+// inside an rc file is not knowable until that rc file has been read.
+type Finisher interface {
+	Finish() error
+}
+
 // Context is the machinery shared by every collector in one scan.
 type Context struct {
 	// Cache is the single-entry stat memo the walker primes.
@@ -66,9 +75,40 @@ type Context struct {
 	// OutputRoot is where collected file bytes are written.
 	OutputRoot string
 
+	// Lists holds paths discovered during the walk by list-producing rules,
+	// keyed the way rules.normalizeListKey names them. The is_file_list
+	// collectors read from here once the walk is over.
+	listMu sync.Mutex
+	lists  map[string][]string
+
 	errOnce sync.Once
 	errW    *spool.Writer
 	errErr  error
+}
+
+// AddToList records a path discovered by a list-producing rule.
+func (c *Context) AddToList(key, path string) {
+	c.listMu.Lock()
+	defer c.listMu.Unlock()
+	if c.lists == nil {
+		c.lists = map[string][]string{}
+	}
+	for _, existing := range c.lists[key] {
+		if existing == path {
+			return
+		}
+	}
+	c.lists[key] = append(c.lists[key], path)
+}
+
+// List returns the paths recorded under a key, sorted so the output does not
+// depend on the order files happened to be visited in.
+func (c *Context) List(key string) []string {
+	c.listMu.Lock()
+	defer c.listMu.Unlock()
+	out := append([]string(nil), c.lists[key]...)
+	sort.Strings(out)
+	return out
 }
 
 // RecordError writes a per-file problem to the errors spool. It deliberately
@@ -101,6 +141,8 @@ func New(r *rules.Rule, ctx *Context) (Collector, error) {
 		return &hashCollector{base: base}, nil
 	case rules.KindFile:
 		return &fileCollector{base: base}, nil
+	case rules.KindList:
+		return &listCollector{base: base}, nil
 	}
 	return nil, fmt.Errorf("unknown collector kind %q", r.Kind)
 }

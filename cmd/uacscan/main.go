@@ -17,6 +17,7 @@ import (
 	"uacscan/internal/config"
 	"uacscan/internal/content"
 	"uacscan/internal/fsref"
+	"uacscan/internal/mounts"
 	"uacscan/internal/passwd"
 	"uacscan/internal/rules"
 	"uacscan/internal/spool"
@@ -100,6 +101,11 @@ func run(mount, outDir, artDir, include, exclude, excludePaths, confPath, target
 		return err
 	}
 
+	// The mount table lets exclude_file_system be honoured. Only mounts at or
+	// beneath the collection root matter, and their paths are recorded
+	// image-relative like everything else.
+	mountTable := mounts.Load().Under(mount)
+
 	accounts := passwd.Load(mount)
 	if !accounts.Known() && verbose {
 		fmt.Fprintf(os.Stderr, "warning: no passwd file under %s; no_user/no_group rules will be skipped\n", mount)
@@ -115,6 +121,7 @@ func run(mount, outDir, artDir, include, exclude, excludePaths, confPath, target
 		EnableAtime:   conf.EnableFindAtime,
 		EnableCtime:   conf.EnableFindCtime,
 		HashAlgorithm: conf.HashAlgorithm,
+		Mounts:        mountTable,
 		UserHomes:     accounts.Homes,
 		OutputDir:     outDir,
 	}
@@ -182,6 +189,10 @@ func run(mount, outDir, artDir, include, exclude, excludePaths, confPath, target
 	for _, p := range conf.ExcludePathPattern {
 		excludePaths += "," + p
 	}
+	// The globally excluded filesystem types prune for every rule.
+	for _, p := range mountTable.PointsForTypes(conf.ExcludeFileSystem) {
+		excludePaths += "," + p
+	}
 	excludeGlobs := compileExcludes(excludePaths, outDir, mount)
 
 	w := &walk.Walker{
@@ -213,6 +224,9 @@ func run(mount, outDir, artDir, include, exclude, excludePaths, confPath, target
 	st := w.Stats()
 	fmt.Printf("definitions   : %s\n", source)
 	fmt.Printf("target os     : %s (%s)\n", osTarget, osReason)
+	if n := len(mountTable); n > 0 {
+		fmt.Printf("mounts        : %d under the collection root\n", n)
+	}
 	fmt.Printf("mount point   : %s\n", mount)
 	fmt.Printf("rules         : %d\n", len(compiled))
 	fmt.Printf("files visited : %d\n", st.Files)

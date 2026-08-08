@@ -238,31 +238,89 @@ unit tests were happy with:
   That is a skip, not a failure: UAC iterates an empty user list and never runs
   `find` at all.
 
-## The one intended divergence
+## Two intended divergences
 
-`find -nouser` consults the account database of the machine it runs on, so UAC
-answers the `user_name_unknown` / `group_name_unknown` artifacts from the
-*examiner's* passwd file. On a mounted image that is meaningless: every file
-owned by a UID that happens not to exist on the workstation looks orphaned.
-uacscan reads the image's own `/etc/passwd` and `/etc/group`, and when the image
-has none it declines to answer rather than flagging everything.
+Both are cases where UAC consults the examiner's machine while collecting from
+an image. The harness knows about each, reports them as EXPECTED rather than
+failures, and fails if the difference is anything other than the one described.
 
-The harness knows about this and reports it as EXPECTED rather than a failure
-when the tree under test has no account database. UAC's own
-`bin/bodyfile2filelists.sh` already does it the correct way with awk, so this
-brings the two halves of UAC into agreement.
+**Account lookups.** `find -nouser` consults the account database of the machine
+it runs on, so UAC answers the `user_name_unknown` / `group_name_unknown`
+artifacts from the *examiner's* passwd file. On a mounted image that is
+meaningless: every file owned by a UID that happens not to exist on the
+workstation looks orphaned. uacscan reads the image's own `/etc/passwd` and
+`/etc/group`, and when the image has none it declines to answer rather than
+flagging everything. UAC's own `bin/bodyfile2filelists.sh` already does it this
+way with awk, so this brings the two halves of UAC into agreement.
 
-## Not yet implemented
+**Command collectors ignore the mount point.** UAC prepends the mount point when
+running `find`, but not when running a command collector. Offline, the HISTFILE
+lookup therefore greps the examiner's home directories rather than the image's.
+It is visible in UAC's own log:
 
-- **`is_file_list` artifacts** (10 shell-history entries). These are genuinely
-  two-phase: the paths come from parsing `HISTFILE=` out of collected rc file
-  *contents*, so they are not knowable before the walk.
-- **`exclude_file_system`** needs the image's mount table; currently only the
-  global path excludes prune.
-- **`getcap` and `immutable_files` output format.** The predicates are
-  implemented natively (the `security.capability` xattr and the statx immutable
-  attribute), but they emit bare paths rather than reproducing `getcap` and
-  `lsattr` output, so the harness compares them as path sets rather than bytes.
+```
+CMD grep -E "HISTFILE=.*" "/home/alice"/.bashrc ...
+    2> grep: /home/alice/.bashrc: No such file or directory
+CMD find /"...\/image"/etc/.login ...          <- the mount point IS applied here
+```
+
+Here it merely misses the history files. On a workstation where `/home/alice`
+does exist it would be worse than a miss: the examiner's own shell history would
+be read and collected into the evidence. uacscan reads the image's rc files, so
+it finds history files UAC does not — two of them in the fixture.
+
+## Two-phase artifacts
+
+Ten shell artifacts locate a history file by grepping `HISTFILE=` out of rc
+files and feeding the result to a second artifact as a file list. The paths are
+not knowable before the walk, so this really is two phases.
+
+The producing half is a `command` collector, which cannot run offline — but the
+command is not arbitrary. Across all ten it is the same shape, so it is
+recognised and performed natively: rc files are read during the walk, the
+assignments extracted, and the resulting paths collected afterwards. That second
+phase is not another traversal; the list names specific files, so each is
+resolved directly.
+
+A `~/` in a per-user rc file means that user's home, which the path tells you.
+In a system-wide rc file the owning user is not implied, so it fans out across
+every home. A history file that does not exist is recorded rather than ignored:
+it is evidence about configuration. Any command that is *not* the recognised
+shape compiles to nothing rather than being approximated.
+
+## Reproducing tool output
+
+Two artifacts pipe `find` output through a command. Both are done natively, and
+reproduce the tool's text rather than just listing paths.
+
+`getcap` becomes a read of the `security.capability` attribute, decoded to
+libcap's text form. Verified byte-identical to the real `getcap` on this
+machine, including a ten-capability binary:
+
+```
+/usr/bin/ping cap_net_raw=ep
+/usr/lib/snapd/snap-confine cap_chown,cap_dac_override,...,cap_sys_resource=p
+```
+
+`immutable_files` becomes `statx` for the immutable attribute — no descriptor —
+followed by `FS_IOC_GETFLAGS` only for the few files that have it, rendered in
+lsattr's column layout. That layout is not guessable, so it was derived by
+measurement: setting individual flags on real files and reading back where
+`lsattr` placed each character. `TestFlagStringAgreesWithSystemLsattr` compares
+against the installed `lsattr` rather than trusting the table. A different
+e2fsprogs release may add columns and shift the tail.
+
+## Known limits
+
+- **`exclude_file_system` is Linux-only.** It reads `/proc/self/mounts`; other
+  platforms return an empty table, so those exclusions cannot be applied there.
+  It matters far more live than offline, where a mounted image rarely contains
+  pseudo filesystems and the device-boundary check already stops the walk.
+- **Only `linux/amd64` is verified.** Everything else is compile-checked; the
+  differential harness has to run on the platform under test.
+- **`command` collectors are out of scope** by design — 661 entries that
+  execute on a live system, which no filesystem walk can stand in for. The
+  HISTFILE extraction above is the one exception, because it only reads files.
 
 ## License
 

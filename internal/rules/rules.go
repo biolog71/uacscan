@@ -14,6 +14,7 @@ import (
 
 	"uacscan/internal/artifact"
 	"uacscan/internal/fsref"
+	"uacscan/internal/mounts"
 	"uacscan/internal/targetos"
 )
 
@@ -25,6 +26,12 @@ const (
 	KindFind Kind = "find" // record the path
 	KindStat Kind = "stat" // emit a bodyfile line
 	KindHash Kind = "hash" // digest the contents
+
+	// KindList is not a UAC collector name. It is what a recognised
+	// HISTFILE-extraction command compiles to: a rule that reads matching rc
+	// files during the walk and contributes the paths it finds to a list some
+	// is_file_list artifact then collects.
+	KindList Kind = "list"
 )
 
 // IsOffline reports whether a collector name can run against a mounted image.
@@ -67,6 +74,10 @@ type Env struct {
 	// examiner's own passwd file and report nonsense.
 	UIDs map[uint32]bool
 	GIDs map[uint32]bool
+
+	// Mounts is the mount table, used to turn an artifact's
+	// exclude_file_system into concrete paths to prune.
+	Mounts mounts.Table
 
 	// UserHomes expands %user_home%.
 	UserHomes []string
@@ -142,6 +153,23 @@ type Rule struct {
 	// Command is carried through for the two find+command artifacts, whose
 	// per-file work (getcap, lsattr) the collectors implement natively.
 	Command string
+
+	// Histfile is set on KindList rules: what to extract and how.
+	Histfile HistfileSpec
+
+	// ListKey ties a producer to its consumer. On a KindList rule it is where
+	// the list would have been written; on a file rule built from
+	// is_file_list it is where the list is read from.
+	ListKey string
+
+	// FromList marks a rule whose paths come from a list produced during the
+	// walk rather than from matching files as they are visited.
+	FromList bool
+
+	// Homes is the set of user home directories, needed to resolve a "~/"
+	// value found in a system-wide rc file, where the owning user is not
+	// implied by the path.
+	Homes []string
 }
 
 // LiteralPrefixes returns the non-glob leading path prefixes of this rule's
@@ -204,6 +232,10 @@ func (r *Rule) InScope(path string) (depth int, ok bool) {
 
 // Match answers the question find would have answered for this file.
 func (r *Rule) Match(f *fsref.FileRef, env *Env) bool {
+	if r.FromList {
+		// Nothing is matched while walking; the paths arrive from a list.
+		return false
+	}
 	depth, ok := r.InScope(f.Path)
 	if !ok {
 		return false
@@ -303,18 +335,13 @@ func inDateRange(f *fsref.FileRef, env *Env) bool {
 // cannot run offline (the command collector) or that need a phase this walk
 // does not provide (is_file_list, whose paths come from other files' contents).
 func Compile(e artifact.Entry, doc *artifact.Doc, env *Env) (*Rule, error) {
-	if !IsOffline(e.Collector) {
-		return nil, nil
-	}
-	if e.IsFileList {
-		// Two-phase artifact: the path list is produced by parsing collected
-		// file contents, so it is not knowable before the walk.
-		return nil, nil
-	}
 	if !targetos.Supports(e.SupportedOS, env.OS) {
-		// The artifact does not apply to this system. Collecting it anyway
-		// would waste the walk and, worse, produce output an analyst would
-		// reasonably read as meaningful.
+		return nil, nil
+	}
+	if e.Collector == "command" {
+		return compileList(e, doc, env)
+	}
+	if !IsOffline(e.Collector) {
 		return nil, nil
 	}
 
@@ -331,6 +358,18 @@ func Compile(e artifact.Entry, doc *artifact.Doc, env *Env) (*Rule, error) {
 	}
 	if e.OutputDirectory != "" {
 		r.OutputDir = e.OutputDirectory
+	}
+
+	if e.IsFileList {
+		// The consumer half of a two-phase artifact: its paths come from a
+		// list built while walking, so it matches nothing directly.
+		if len(e.Path) == 0 {
+			return nil, fmt.Errorf("%s: is_file_list with no path", e.ID())
+		}
+		r.FromList = true
+		r.ListKey = normalizeListKey(expandSimple(e.Path[0], env))
+		r.Homes = env.UserHomes
+		return r, nil
 	}
 
 	needsUserHome := false
@@ -358,8 +397,16 @@ func Compile(e artifact.Entry, doc *artifact.Doc, env *Env) (*Rule, error) {
 
 	r.pathPatterns = compileGlobs(e.PathPattern)
 	r.namePatterns = compileGlobs(e.NamePattern)
-	r.excludePath = compileGlobs(e.ExcludePathPattern)
 	r.excludeName = compileGlobs(e.ExcludeNamePattern)
+
+	// exclude_file_system names filesystem types; the walk needs paths. Resolve
+	// them through the mount table and fold them into the path exclusions, so
+	// there is one mechanism rather than two.
+	excludePaths := append([]string(nil), e.ExcludePathPattern...)
+	for _, p := range env.Mounts.PointsForTypes(e.ExcludeFileSystem) {
+		excludePaths = append(excludePaths, p, p+"/*")
+	}
+	r.excludePath = compileGlobs(excludePaths)
 
 	if len(e.FileType) > 0 {
 		r.types = map[byte]bool{}
@@ -381,6 +428,60 @@ func Compile(e artifact.Entry, doc *artifact.Doc, env *Env) (*Rule, error) {
 	r.maxSize, r.hasMaxSize = e.MaxFileSize, e.HasMaxFileSize
 	r.maxDepth, r.hasMaxDepth = e.MaxDepth, e.HasMaxDepth
 	return r, nil
+}
+
+// compileList turns a recognised HISTFILE-extraction command into a rule. An
+// unrecognised command compiles to nothing: it is a live-system artifact this
+// tool does not implement, and pretending otherwise would be worse than
+// skipping it.
+func compileList(e artifact.Entry, doc *artifact.Doc, env *Env) (*Rule, error) {
+	spec, ok := ParseHistfileCommand(e.Command)
+	if !ok {
+		return nil, nil
+	}
+	if e.OutputFile == "" {
+		return nil, nil
+	}
+	dir := doc.OutputDirectory
+	if e.OutputDirectory != "" {
+		dir = e.OutputDirectory
+	}
+
+	r := &Rule{
+		ID:              e.ID(),
+		Source:          e.Source,
+		Kind:            KindList,
+		Histfile:        spec,
+		ListKey:         normalizeListKey(expandSimple(dir, env) + "/" + e.OutputFile),
+		Homes:           env.UserHomes,
+		ignoreDateRange: true,
+	}
+	for _, p := range spec.Files {
+		for _, expanded := range expandVars(p, env) {
+			r.anchors = append(r.anchors, anchor{
+				glob:  CompileGlob(expanded),
+				depth: strings.Count(expanded, "/"),
+			})
+		}
+	}
+	if len(r.anchors) == 0 {
+		return nil, nil
+	}
+	// Only the named rc files, never anything beneath them.
+	r.hasMaxDepth, r.maxDepth = true, 0
+	return r, nil
+}
+
+// normalizeListKey reduces the many ways the same list is named -- with or
+// without a leading slash, with the temp directory expanded or not -- to the
+// basename, which is unique across the corpus and is what actually ties a
+// producer to its consumer.
+func normalizeListKey(p string) string {
+	p = strings.TrimSpace(p)
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		p = p[i+1:]
+	}
+	return p
 }
 
 func compileGlobs(pats []string) []Glob {

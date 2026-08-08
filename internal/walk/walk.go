@@ -142,6 +142,16 @@ func (w *Walker) Walk() error {
 		sort.Slice(dirs, func(i, j int) bool { return dirs[i].rel > dirs[j].rel })
 		stack = append(stack, dirs...)
 	}
+
+	// Second phase, for artifacts whose paths only became known during the
+	// walk -- a shell history file named inside an rc file, say.
+	for _, c := range w.Collectors {
+		if f, ok := c.(collector.Finisher); ok {
+			if err := f.Finish(); err != nil {
+				return fmt.Errorf("finishing collector: %w", err)
+			}
+		}
+	}
 	return w.flush()
 }
 

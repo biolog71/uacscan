@@ -229,16 +229,69 @@ func TestCompileUserHomeFansOut(t *testing.T) {
 	}
 }
 
-func TestCompileSkipsNonOfflineAndTwoPhase(t *testing.T) {
+func TestCompileSkipsUnimplementedCommands(t *testing.T) {
 	env := &Env{Now: time.Now()}
 	doc := &artifact.Doc{}
+	// A live-system command is not something a walk can stand in for.
 	cmd := artifact.Entry{Collector: "command", Command: "ps aux"}
 	if r, err := Compile(cmd, doc, env); err != nil || r != nil {
-		t.Errorf("command collector should compile to nil, got %v %v", r, err)
+		t.Errorf("an unrecognised command should compile to nil, got %v %v", r, err)
 	}
-	fl := artifact.Entry{Collector: "file", IsFileList: true, Path: []string{"/x"}}
-	if r, err := Compile(fl, doc, env); err != nil || r != nil {
-		t.Errorf("is_file_list should compile to nil, got %v %v", r, err)
+}
+
+// The two halves of a two-phase artifact have to find each other, and they name
+// the list differently: the producer by output_directory plus output_file, the
+// consumer by a path with the temp directory in it.
+func TestTwoPhaseHalvesShareAListKey(t *testing.T) {
+	env := &Env{Now: time.Now(), UserHomes: []string{"/root", "/home/alice"}, TempDir: "/uac-data.tmp"}
+	doc := &artifact.Doc{}
+
+	producer := artifact.Entry{
+		Source: "files/shell/bash.yaml", Index: 5, Collector: "command",
+		Command:         `grep -E "HISTFILE=.*" %user_home%/.bashrc | sed -e 's|.*HISTFILE=||' -e 's|^~/|%user_home%/|'`,
+		OutputDirectory: "/%temp_directory%/files/shell",
+		OutputFile:      "bash_histfile.txt",
+	}
+	consumer := artifact.Entry{
+		Source: "files/shell/bash.yaml", Index: 6, Collector: "file",
+		Path:       []string{"/%temp_directory%/files/shell/bash_histfile.txt"},
+		IsFileList: true,
+	}
+
+	p, err := Compile(producer, doc, env)
+	if err != nil || p == nil {
+		t.Fatalf("producer did not compile: %v %v", p, err)
+	}
+	if p.Kind != KindList {
+		t.Errorf("producer Kind = %q, want %q", p.Kind, KindList)
+	}
+	if p.Histfile.Var != "HISTFILE" {
+		t.Errorf("producer did not capture the variable: %+v", p.Histfile)
+	}
+	// One anchor per user home.
+	if len(p.anchors) != 2 {
+		t.Errorf("producer has %d anchors, want one per home", len(p.anchors))
+	}
+
+	c, err := Compile(consumer, doc, env)
+	if err != nil || c == nil {
+		t.Fatalf("consumer did not compile: %v %v", c, err)
+	}
+	if !c.FromList {
+		t.Error("consumer is not marked as list-driven")
+	}
+	if c.ListKey != p.ListKey {
+		t.Errorf("the halves disagree on the list: producer %q, consumer %q", p.ListKey, c.ListKey)
+	}
+
+	// A list-driven rule must never match during the walk; its paths arrive
+	// from the list, and matching would collect the wrong thing.
+	f := &fsref.FileRef{Path: "/home/alice/.bashrc", Name: ".bashrc", RawMode: 0100644}
+	if c.Match(f, env) {
+		t.Error("a list-driven rule matched a file during the walk")
+	}
+	if !p.Match(f, env) {
+		t.Error("the producer did not match the rc file it is meant to read")
 	}
 }
 

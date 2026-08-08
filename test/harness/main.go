@@ -65,11 +65,13 @@ const defaultArtifacts = "bodyfile/bodyfile.yaml," +
 	"system/world_writable_files.yaml,system/group_writable_files.yaml," +
 	"system/hidden_files.yaml,system/hidden_directories.yaml," +
 	"hash_executables/hash_executables.yaml," +
+	"system/getcap.yaml,system/immutable_files.yaml," +
+	"files/shell/bash.yaml,files/shell/common.yaml," +
 	"system/user_name_unknown_files.yaml,system/group_name_unknown_files.yaml," +
 	"system/user_name_unknown_directories.yaml,system/group_name_unknown_directories.yaml," +
 	"system/world_writable_directories.yaml,system/group_writable_directories.yaml," +
 	"files/ssh/authorized_keys.yaml,files/ssh/known_hosts.yaml," +
-	"files/shell/bash.yaml,files/system/etc.yaml"
+	"files/system/etc.yaml"
 
 func run(uacDir, artifactList, work, image string, keep, verbose bool) error {
 	if work == "" {
@@ -120,7 +122,7 @@ func run(uacDir, artifactList, work, image string, keep, verbose bool) error {
 
 	fmt.Println("== running uacscan ==")
 	t0 = time.Now()
-	stats, err := runScan(uacDir, artifactList, root, scanOut)
+	stats, twoPhase, err := runScan(uacDir, artifactList, root, scanOut)
 	scanElapsed := time.Since(t0)
 	if err != nil {
 		return fmt.Errorf("running uacscan: %w", err)
@@ -134,7 +136,7 @@ func run(uacDir, artifactList, work, image string, keep, verbose bool) error {
 			float64(uacElapsed)/float64(scanElapsed))
 	}
 
-	return compare(uacResult, scanOut, root, verbose)
+	return compare(uacResult, scanOut, root, twoPhase, verbose)
 }
 
 // ResolveUAC decides which UAC the comparison runs against.
@@ -210,7 +212,10 @@ func findOutputDir(out, base string) (string, error) {
 	return "", fmt.Errorf("no UAC output directory under %s", out)
 }
 
-func runScan(uacDir, artifactList, root, out string) (walk.Stats, error) {
+// runScan returns the walk statistics and the paths collected by the two-phase
+// artifacts, which the comparison needs in order to explain a divergence that
+// is intended.
+func runScan(uacDir, artifactList, root, out string) (walk.Stats, map[string]bool, error) {
 	docs, parseErrs := artifact.LoadDir(filepath.Join(uacDir, "artifacts"))
 	for f, err := range parseErrs {
 		fmt.Fprintf(os.Stderr, "   warning: %s: %v\n", f, err)
@@ -223,7 +228,7 @@ func runScan(uacDir, artifactList, root, out string) (walk.Stats, error) {
 
 	conf, err := config.Load(filepath.Join(uacDir, "config", "uac.conf"))
 	if err != nil {
-		return walk.Stats{}, err
+		return walk.Stats{}, nil, err
 	}
 	accounts := passwd.Load(root)
 	env := &rules.Env{
@@ -253,7 +258,7 @@ func runScan(uacDir, artifactList, root, out string) (walk.Stats, error) {
 		for _, e := range d.Artifacts {
 			r, err := rules.Compile(e, d, env)
 			if err != nil {
-				return walk.Stats{}, err
+				return walk.Stats{}, nil, err
 			}
 			if r != nil {
 				compiled = append(compiled, r)
@@ -261,13 +266,13 @@ func runScan(uacDir, artifactList, root, out string) (walk.Stats, error) {
 		}
 	}
 	if len(compiled) == 0 {
-		return walk.Stats{}, fmt.Errorf("no rules selected")
+		return walk.Stats{}, nil, fmt.Errorf("no rules selected")
 	}
 	fmt.Printf("   %d rules compiled\n", len(compiled))
 
 	store, serr := spool.NewStore(out)
 	if serr != nil {
-		return walk.Stats{}, serr
+		return walk.Stats{}, nil, serr
 	}
 	cache := fsref.NewCache(root)
 	broker := content.NewBroker()
@@ -278,7 +283,7 @@ func runScan(uacDir, artifactList, root, out string) (walk.Stats, error) {
 	for _, r := range compiled {
 		c, err := collector.New(r, ctx)
 		if err != nil {
-			return walk.Stats{}, err
+			return walk.Stats{}, nil, err
 		}
 		cs = append(cs, c)
 	}
@@ -288,9 +293,18 @@ func runScan(uacDir, artifactList, root, out string) (walk.Stats, error) {
 		OnError: func(p string, err error) { ctx.RecordError(p, "walk", err) },
 	}
 	if err := w.Walk(); err != nil {
-		return walk.Stats{}, err
+		return walk.Stats{}, nil, err
 	}
-	return w.Stats(), store.Close()
+	// Paths that only became known during the walk, by reading rc files.
+	twoPhase := map[string]bool{}
+	for _, r := range compiled {
+		if r.FromList {
+			for _, p := range ctx.List(r.ListKey) {
+				twoPhase[strings.TrimPrefix(p, "/")] = true
+			}
+		}
+	}
+	return w.Stats(), twoPhase, store.Close()
 }
 
 // ---------------------------------------------------------------------------
@@ -331,7 +345,21 @@ var ownershipArtifacts = map[string]bool{
 const ownershipDivergence = "by design: uacscan reads the image's account database, " +
 	"which this tree does not have; find -nouser used the host's"
 
-func compare(uacDir, scanDir, root string, verbose bool) error {
+// twoPhaseDivergence explains the second intended difference.
+//
+// UAC does not prepend the mount point when running a command collector, only
+// when running find. Offline, the HISTFILE extraction therefore greps the
+// *examiner's* home directories rather than the image's -- visible in UAC's own
+// log as "grep: /home/alice/.bashrc: No such file or directory" while the file
+// collectors are correctly reading from the image. On a workstation where those
+// paths do exist it would be worse than a miss: the examiner's own shell
+// history would be collected into the evidence.
+//
+// uacscan reads the image's rc files, so it finds history files UAC does not.
+const twoPhaseDivergence = "by design: UAC does not apply the mount point to command " +
+	"collectors, so its HISTFILE lookup reads the examiner's home directories, not the image's"
+
+func compare(uacDir, scanDir, root string, twoPhase map[string]bool, verbose bool) error {
 	fmt.Println("== comparison ==")
 	var diffs []diff
 
@@ -346,6 +374,9 @@ func compare(uacDir, scanDir, root string, verbose bool) error {
 		"system/user_name_unknown_files.txt", "system/group_name_unknown_files.txt",
 		"system/user_name_unknown_directories.txt", "system/group_name_unknown_directories.txt",
 		"system/world_writable_directories.txt", "system/group_writable_directories.txt",
+		// These reproduce getcap and lsattr output, so they are compared as
+		// whole lines rather than as bare paths.
+		"system/getcap.txt", "system/immutable_files.txt",
 	} {
 		d := comparePathList(uacDir, scanDir, root, f)
 		if !imageHasAccounts && ownershipArtifacts[f] {
@@ -357,7 +388,11 @@ func compare(uacDir, scanDir, root string, verbose bool) error {
 		diffs = append(diffs, compareHashes(uacDir, scanDir, root,
 			"hash_executables/hash_executables."+algo))
 	}
-	diffs = append(diffs, compareCollectedTree(uacDir, scanDir))
+	collected := compareCollectedTree(uacDir, scanDir)
+	if len(twoPhase) > 0 && !liveCollection(root) && onlyTwoPhase(collected.onlyScan, twoPhase) {
+		collected.expected = twoPhaseDivergence
+	}
+	diffs = append(diffs, collected)
 
 	failures := 0
 	for _, d := range diffs {
@@ -405,6 +440,26 @@ func compare(uacDir, scanDir, root string, verbose bool) error {
 // stripMount removes the mount point from a path. UAC's bodyfile and find
 // outputs carry it because find was given the prefixed path; uacscan records
 // image-relative paths, so one side has to be normalised for comparison.
+// liveCollection reports whether the comparison ran against the running system,
+// where UAC's command collectors are correct.
+func liveCollection(root string) bool {
+	return root == "" || root == "/"
+}
+
+// onlyTwoPhase reports whether every extra file uacscan collected came from the
+// two-phase artifacts. Anything else is a real difference.
+func onlyTwoPhase(onlyScan []string, twoPhase map[string]bool) bool {
+	if len(onlyScan) == 0 {
+		return false
+	}
+	for _, p := range onlyScan {
+		if !twoPhase[strings.TrimPrefix(p, "[root]/")] {
+			return false
+		}
+	}
+	return true
+}
+
 func stripMount(p, root string) string {
 	root = strings.TrimSuffix(root, "/")
 	if strings.HasPrefix(p, root+"/") {
