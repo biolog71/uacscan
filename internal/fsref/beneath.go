@@ -46,15 +46,19 @@ func CleanImagePath(p string) (string, error) {
 // run as root that is a read of the host, or, once the same path reaches the
 // copy destination, a write outside the output directory.
 //
-// So every directory leading to the target is checked with lstat, and a
-// symlinked one is refused rather than followed.
+// On Linux the kernel is asked to resolve the path under the root with
+// openat2's RESOLVE_BENEATH, which fails outright if any component would leave
+// it -- through a symlink, a magic link, or "..". That is one atomic
+// resolution rather than a sequence of separate checks.
 //
-// This is a check rather than a descent through pinned descriptors, so it is
-// theoretically racy: something could swap a directory for a symlink between
-// the check and the read. That does not apply to the case this defends against
-// -- a forensic image is static, and mounted read-only if the examiner is doing
-// it properly -- and unlike an openat2-based descent it works on every platform
-// this tool supports rather than only recent Linux.
+// Where openat2 is unavailable -- an older kernel, or any other platform --
+// every directory leading to the target is checked with lstat instead, and a
+// symlinked one is refused.
+//
+// Either way this is a check followed by an open by path, so a window remains
+// against something mutating the image mid-scan. That does not apply to the
+// case it defends against: a forensic image is static, and mounted read-only
+// if the examiner is doing it properly.
 func ResolveBeneath(root, rel string) (*FileRef, error) {
 	cleaned, err := CleanImagePath(rel)
 	if err != nil {
@@ -63,8 +67,14 @@ func ResolveBeneath(root, rel string) (*FileRef, error) {
 	real := Join(root, cleaned)
 
 	if root != "" && root != "/" {
-		if err := checkBeneath(root, cleaned); err != nil {
+		checked, err := checkBeneathKernel(root, cleaned)
+		if err != nil {
 			return nil, err
+		}
+		if !checked {
+			if err := checkBeneath(root, cleaned); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return Resolve(real, cleaned, strings.Count(strings.Trim(cleaned, "/"), "/"))

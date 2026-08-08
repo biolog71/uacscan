@@ -139,3 +139,79 @@ func TestCreateNoFollowRefusesAnExistingSymlink(t *testing.T) {
 	}
 	f.Close()
 }
+
+// Both containment mechanisms must reach the same verdict, so that a kernel
+// without openat2 is demonstrably no less safe than one with it.
+func TestBothContainmentMechanismsAgree(t *testing.T) {
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("host"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	image := t.TempDir()
+	for _, d := range []string{"etc", "var/log"} {
+		if err := os.MkdirAll(filepath.Join(image, d), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(image, "etc/passwd"), []byte("ok"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(image, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/", filepath.Join(image, "var/log/root")); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		path string
+		ok   bool
+	}{
+		{"/etc/passwd", true},
+		{"/escape/secret", false},
+		{"/var/log/root/etc/passwd", false},
+		{"/nonexistent/file", true}, // absent, not an escape
+	}
+	for _, tc := range cases {
+		cleaned, err := CleanImagePath(tc.path)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.path, err)
+		}
+
+		kernelChecked, kernelErr := checkBeneathKernel(image, cleaned)
+		portableErr := checkBeneath(image, cleaned)
+
+		if kernelChecked && (kernelErr == nil) != (portableErr == nil) {
+			t.Errorf("%s: openat2 says %v, the lstat check says %v",
+				tc.path, kernelErr, portableErr)
+		}
+		allowed := portableErr == nil
+		if kernelChecked {
+			allowed = kernelErr == nil
+		}
+		if allowed != tc.ok {
+			t.Errorf("%s: allowed=%v, want %v (kernel=%v portable=%v)",
+				tc.path, allowed, tc.ok, kernelErr, portableErr)
+		}
+	}
+}
+
+// Confirms the kernel path is genuinely exercised here rather than silently
+// falling back, which would make the test above vacuous.
+func TestOpenat2IsExercisedWhereAvailable(t *testing.T) {
+	image := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(image, "etc"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(image, "etc/passwd"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	checked, err := checkBeneathKernel(image, "/etc/passwd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !checked {
+		t.Skip("no openat2 on this kernel; the portable check is in use")
+	}
+	t.Log("openat2 is in use")
+}
