@@ -10,11 +10,12 @@ package targetos
 
 import (
 	"io/fs"
-	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+
+	"uacscan/internal/fsref"
 )
 
 // OS is one of the operating system names UAC's artifacts use in supported_os.
@@ -98,10 +99,18 @@ var markers = []marker{
 
 // Detect identifies the operating system of the tree at root, returning the
 // marker that decided it. An empty OS means nothing matched, which is common
-// for a partial image or an arbitrary directory -- callers should fall back to
-// the host rather than guessing.
+// for a partial image or an arbitrary directory.
+//
+// Markers are checked with containment: a symlink pointing out of the image
+// must not count as evidence that the image is anything, or a hostile image
+// could steer the whole artifact selection by planting one.
 func Detect(root string) (OS, string) {
-	return DetectFS(os.DirFS(root))
+	for _, m := range markers {
+		if fsref.ExistsBeneath(root, "/"+m.path) || fsref.DirExistsBeneath(root, "/"+m.path) {
+			return m.os, m.path
+		}
+	}
+	return Unknown, ""
 }
 
 // DetectFS is Detect over any filesystem, which is what makes it testable

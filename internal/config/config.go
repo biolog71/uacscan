@@ -11,9 +11,11 @@ package config
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -111,7 +113,29 @@ func Read(r io.Reader) (*Config, error) {
 			c.EnableFindCtime = val == "true"
 		}
 	}
-	return c, sc.Err()
+	if err := sc.Err(); err != nil {
+		return c, err
+	}
+	return c, c.validate()
+}
+
+// SupportedHashAlgorithms are the digests this tool can produce.
+var SupportedHashAlgorithms = []string{"md5", "sha1", "sha256"}
+
+// validate rejects a configuration that would silently collect nothing.
+//
+// An unknown algorithm name used to be skipped at hashing time, so a
+// configuration naming only unknown ones completed successfully, visited every
+// file, produced no hashes and recorded no error. A collection that quietly
+// omits evidence is worse than one that refuses to start.
+func (c *Config) validate() error {
+	for _, a := range c.HashAlgorithm {
+		if !slices.Contains(SupportedHashAlgorithms, a) {
+			return fmt.Errorf("unsupported hash_algorithm %q; expected one of: %s",
+				a, strings.Join(SupportedHashAlgorithms, ", "))
+		}
+	}
+	return nil
 }
 
 func parseList(val string) []string {

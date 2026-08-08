@@ -9,6 +9,7 @@ package walk
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -30,11 +31,20 @@ type Walker struct {
 
 	Collectors []collector.Collector
 
-	// ExcludePaths prunes globally: excluded filesystems, the tool's own output
-	// directory, anything the operator asked to skip. Unlike a rule's own
-	// exclusions these really do stop the descent, because no rule can want
-	// what is behind them.
+	// ExcludePaths prunes globally: excluded filesystems, anything the operator
+	// asked to skip. Unlike a rule's own exclusions these really do stop the
+	// descent, because no rule can want what is behind them.
 	ExcludePaths []rules.Glob
+
+	// SkipReal holds absolute, symlink-resolved paths that must never be
+	// entered -- above all the run's own output directory.
+	//
+	// A glob cannot do this job. The output path is chosen by the operator, so
+	// it can contain glob metacharacters ("-o ./[out]" matched nothing as a
+	// pattern), and it may be given relative while the walk sees absolute
+	// paths. Comparing resolved paths is the only way that holds for every
+	// destination, including one inside the image being collected.
+	SkipReal map[string]bool
 
 	// CrossDevice allows the walk to leave the root filesystem. Off by default:
 	// on a mounted image, crossing a device boundary means leaving the evidence.
@@ -123,7 +133,7 @@ func (w *Walker) Walk() error {
 			realPath := join(fr.real, de.Name())
 			relPath := join(fr.rel, de.Name())
 
-			if w.globallyExcluded(relPath) {
+			if w.globallyExcluded(relPath) || w.SkipReal[canonical(realPath)] {
 				continue
 			}
 
@@ -227,6 +237,19 @@ func (w *Walker) reportErr(path string, err error) {
 	if w.OnError != nil {
 		w.OnError(path, err)
 	}
+}
+
+// canonical resolves a path for comparison against SkipReal. Symlinks are
+// resolved so that a link into the output directory is caught too; a path that
+// cannot be resolved is compared as given.
+func canonical(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
 }
 
 func join(dir, name string) string {

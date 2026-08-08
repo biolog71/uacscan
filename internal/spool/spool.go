@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // Entry describes one spool file in the manifest.
@@ -97,10 +98,7 @@ type Store struct {
 // files are selectively overwritten, and the manifest counts only what this run
 // wrote -- a mixture that looks like a single coherent collection and is not.
 func NewStore(root string) (*Store, error) {
-	if err := checkEmpty(root); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(root, 0755); err != nil {
+	if err := reserve(root); err != nil {
 		return nil, err
 	}
 	return &Store{
@@ -111,20 +109,42 @@ func NewStore(root string) (*Store, error) {
 	}, nil
 }
 
-// checkEmpty refuses a directory that already holds a collection.
-func checkEmpty(root string) error {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+// reserveMarker is created exclusively to claim an output directory.
+const reserveMarker = ".uacscan-collection"
+
+// reserve claims root for this collection.
+//
+// Checking that a directory is empty and then creating it is two steps: two
+// stores opened before either writes would both see an empty directory, both
+// succeed, and later append into the same files. Creating a marker with O_EXCL
+// is one step, so exactly one caller can win.
+func reserve(root string) error {
+	if err := os.MkdirAll(root, 0755); err != nil {
 		return err
 	}
-	if len(entries) > 0 {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if e.Name() == reserveMarker {
+			return fmt.Errorf("output directory %s is already claimed by another collection", root)
+		}
 		return fmt.Errorf("output directory %s is not empty; "+
 			"a collection must not be mixed with an earlier one", root)
 	}
-	return nil
+
+	f, err := os.OpenFile(filepath.Join(root, reserveMarker),
+		os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("output directory %s is already claimed by another collection", root)
+		}
+		return err
+	}
+	defer f.Close()
+	_, err = fmt.Fprintf(f, "claimed %s\n", time.Now().UTC().Format(time.RFC3339))
+	return err
 }
 
 // Open returns the writer for an output file, creating it on first use. dir is

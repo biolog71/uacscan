@@ -2,6 +2,7 @@ package fsref
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"strings"
@@ -151,4 +152,100 @@ func CreateNoFollow(path string, perm os.FileMode) (*os.File, error) {
 		return nil, &os.PathError{Op: "create", Path: path, Err: err}
 	}
 	return os.NewFile(uintptr(fd), path), nil
+}
+
+// MaxMetadataFile caps how much of an image file the metadata helpers will
+// read. Hostnames and passwd files are small; anything larger is not one.
+const MaxMetadataFile = 4 << 20
+
+// OpenBeneath opens a regular file inside root for reading, without following
+// symlinks and without blocking.
+//
+// The metadata helpers -- hostname, account database, OS markers -- read files
+// chosen by the image, and a hostile image can make any of them a symlink to
+// the examiner's filesystem or a FIFO that never opens. os.Open does both:
+// follows the link, and blocks. So the path is contained first, the open is
+// O_NOFOLLOW|O_NONBLOCK, and the result must be a regular file.
+func OpenBeneath(root, rel string) (*os.File, error) {
+	cleaned, err := CleanImagePath(rel)
+	if err != nil {
+		return nil, err
+	}
+	if root != "" && root != "/" {
+		checked, cerr := checkBeneathKernel(root, cleaned)
+		if cerr != nil {
+			return nil, cerr
+		}
+		if !checked {
+			if cerr := checkBeneath(root, cleaned); cerr != nil {
+				return nil, cerr
+			}
+		}
+	}
+	full := Join(root, cleaned)
+
+	fd, err := syscall.Open(full,
+		syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: full, Err: err}
+	}
+	f := os.NewFile(uintptr(fd), full)
+
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	// A FIFO opened O_NONBLOCK succeeds and then blocks on read; a device could
+	// be worse. Only regular files carry the metadata these helpers want.
+	if !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, &os.PathError{Op: "open", Path: full,
+			Err: fmt.Errorf("not a regular file (%s)", fi.Mode().Type())}
+	}
+	return f, nil
+}
+
+// ReadBeneath reads a metadata file from inside root, subject to the same
+// containment and file-type rules as OpenBeneath and capped in size.
+func ReadBeneath(root, rel string) ([]byte, error) {
+	f, err := OpenBeneath(root, rel)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, MaxMetadataFile))
+}
+
+// ExistsBeneath reports whether rel names an existing regular file inside root.
+// Used for the operating-system markers, where a symlink pointing out of the
+// image must not count as evidence of anything.
+func ExistsBeneath(root, rel string) bool {
+	f, err := OpenBeneath(root, rel)
+	if err != nil {
+		return false
+	}
+	f.Close()
+	return true
+}
+
+// DirExistsBeneath reports whether rel names an existing directory inside root.
+func DirExistsBeneath(root, rel string) bool {
+	cleaned, err := CleanImagePath(rel)
+	if err != nil {
+		return false
+	}
+	if root != "" && root != "/" {
+		checked, cerr := checkBeneathKernel(root, cleaned)
+		if cerr != nil {
+			return false
+		}
+		if !checked {
+			if cerr := checkBeneath(root, cleaned); cerr != nil {
+				return false
+			}
+		}
+	}
+	fi, err := os.Lstat(Join(root, cleaned))
+	return err == nil && fi.IsDir()
 }

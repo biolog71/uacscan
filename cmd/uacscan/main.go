@@ -146,8 +146,13 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 		MaxDepth:           conf.MaxDepth,
 		OutputDir:          outDir,
 	}
-	if accounts.Known() {
-		env.UIDs, env.GIDs = accounts.UIDs, accounts.GIDs
+	// Set independently: an image may have a passwd file and no group file, or
+	// the reverse, and conflating them produces opposite errors.
+	if accounts.KnownUsers() {
+		env.UIDs = accounts.UIDs
+	}
+	if accounts.KnownGroups() {
+		env.GIDs = accounts.GIDs
 	}
 
 	inc := splitGlobs(include)
@@ -214,7 +219,18 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 	for _, p := range mountTable.PointsForTypes(conf.ExcludeFileSystem) {
 		excludePaths += "," + p
 	}
-	excludeGlobs := compileExcludes(excludePaths, dest, mount)
+	excludeGlobs := compileExcludes(excludePaths)
+
+	// The run's own output must never be collected, and a glob cannot express
+	// that reliably: the operator chooses the path, so it may contain glob
+	// metacharacters or be given relative to the working directory. Both the
+	// run directory and the destination are pruned by resolved absolute path.
+	skipReal := map[string]bool{}
+	for _, p := range []string{outDir, dest} {
+		if c := canonicalPath(p); c != "" {
+			skipReal[c] = true
+		}
+	}
 
 	w := &walk.Walker{
 		Root:         mount,
@@ -223,6 +239,7 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 		Set:          rules.NewSet(compiled),
 		Collectors:   cs,
 		ExcludePaths: excludeGlobs,
+		SkipReal:     skipReal,
 		CrossDevice:  crossDev,
 		Recorded:     ctx.RecordedErrors,
 		OnError: func(path string, err error) {
@@ -358,18 +375,19 @@ func selected(source string, inc, exc []rules.Glob) bool {
 	return false
 }
 
-// compileExcludes builds the global prune set. The output directory is always
-// included: collecting our own output would be both wrong and unbounded.
-func compileExcludes(list, outDir, mount string) []rules.Glob {
+// compileExcludes builds the operator-supplied prune globs.
+//
+// The output directory is deliberately not here. It used to be, expressed as a
+// glob against the mount-relative path of the destination's *parent*, which
+// failed three ways: the actual run directory was never named, a destination
+// containing glob metacharacters was read as a pattern, and a relative
+// destination never matched the absolute paths the walk produces. It is pruned
+// by resolved path instead; see Walker.SkipReal.
+func compileExcludes(list string) []rules.Glob {
 	set := map[string]bool{}
 	for _, p := range strings.Split(list, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			set[p] = true
-		}
-	}
-	if abs, err := filepath.Abs(outDir); err == nil {
-		if rel := fsref.Rel(abs, mount); strings.HasPrefix(rel, "/") && rel != "/" {
-			set[rel] = true
 		}
 	}
 	keys := make([]string, 0, len(set))
@@ -382,4 +400,20 @@ func compileExcludes(list, outDir, mount string) []rules.Glob {
 		out = append(out, rules.CompileGlob(k), rules.CompileGlob(k+"/*"))
 	}
 	return out
+}
+
+// canonicalPath resolves a path to an absolute, symlink-free form for
+// comparison during the walk.
+func canonicalPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return ""
+	}
+	if resolved, rerr := filepath.EvalSymlinks(abs); rerr == nil {
+		return resolved
+	}
+	return filepath.Clean(abs)
 }

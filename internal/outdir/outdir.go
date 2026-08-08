@@ -18,11 +18,14 @@ package outdir
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"uacscan/internal/fsref"
 )
 
 // TimestampLayout is the 14-digit form UAC uses.
@@ -103,51 +106,52 @@ func Hostname(mountPoint string) string {
 	}
 	root := strings.TrimSuffix(mountPoint, "/")
 
-	if h := firstLine(filepath.Join(root, "etc/hostname")); h != "" {
+	if h := firstLine(root, "/etc/hostname"); h != "" {
 		return h
 	}
 	// FreeBSD and NetScaler keep it in rc.conf as hostname="name".
-	if h := rcConfHostname(filepath.Join(root, "etc/rc.conf")); h != "" {
+	if h := rcConfHostname(root, "/etc/rc.conf"); h != "" {
 		return h
 	}
-	if h := firstLine(filepath.Join(root, "etc/myname")); h != "" { // OpenBSD
+	if h := firstLine(root, "/etc/myname"); h != "" { // OpenBSD
 		return h
 	}
-	if h := firstLine(filepath.Join(root, "etc/nodename")); h != "" { // Solaris
+	if h := firstLine(root, "/etc/nodename"); h != "" { // Solaris
 		return h
 	}
 	return "unknown"
 }
 
-func firstLine(path string) string {
-	f, err := os.Open(path)
+// firstLine reads through fsref.ReadBeneath rather than os.Open: the file is
+// named by the image, and a hostile one can make it a symlink to the
+// examiner's filesystem or a FIFO that never opens.
+func firstLine(root, rel string) string {
+	b, err := fsref.ReadBeneath(root, rel)
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(bytes.NewReader(b))
 	for sc.Scan() {
 		if line := strings.TrimSpace(sc.Text()); line != "" && !strings.HasPrefix(line, "#") {
-			return line
+			return sanitize(line)
 		}
 	}
 	return ""
 }
 
-func rcConfHostname(path string) string {
-	f, err := os.Open(path)
+func rcConfHostname(root, rel string) string {
+	b, err := fsref.ReadBeneath(root, rel)
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(bytes.NewReader(b))
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		v, ok := strings.CutPrefix(line, "hostname=")
 		if !ok {
 			continue
 		}
-		return strings.Trim(strings.TrimSpace(v), `"'`)
+		return sanitize(strings.Trim(strings.TrimSpace(v), `"'`))
 	}
 	return ""
 }

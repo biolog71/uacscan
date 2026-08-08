@@ -11,11 +11,13 @@ package passwd
 
 import (
 	"bufio"
-	"os"
-	"path/filepath"
+	"bytes"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+
+	"uacscan/internal/fsref"
 )
 
 // DB is the account information read from one image.
@@ -29,11 +31,15 @@ type DB struct {
 	ShellHomes []string
 }
 
-var nologinShells = map[string]bool{
-	"/bin/false": true, "/usr/bin/false": true,
-	"/sbin/nologin": true, "/usr/sbin/nologin": true,
-	"/bin/sync": true, "/usr/bin/sync": true,
-	"": true,
+// nonInteractiveShell matches the same shells UAC's get_user_home_list.sh
+// excludes. It is suffix-anchored on purpose: an exact list of paths misses
+// /usr/local/bin/false, /usr/local/sbin/nologin and every other packaging
+// variant, which would leave service accounts in a collection that asked for
+// them to be left out. The trailing alternative matches an empty shell field.
+var nonInteractiveShell = regexp.MustCompile(`(false|halt|nologin|shutdown|sync|git-shell)$|^$`)
+
+func isInteractiveShell(shell string) bool {
+	return !nonInteractiveShell.MatchString(strings.TrimSpace(shell))
 }
 
 // Load reads <root>/etc/passwd and <root>/etc/group. Missing files are not an
@@ -43,8 +49,8 @@ func Load(root string) *DB {
 
 	homes := map[string]bool{}
 	shellHomes := map[string]bool{}
-	for _, rel := range []string{"etc/passwd", "private/etc/passwd"} {
-		forEachField(filepath.Join(root, rel), func(f []string) {
+	for _, rel := range []string{"/etc/passwd", "/private/etc/passwd"} {
+		forEachField(root, rel, func(f []string) {
 			if len(f) < 7 {
 				return
 			}
@@ -56,13 +62,13 @@ func Load(root string) *DB {
 				return
 			}
 			homes[home] = true
-			if !nologinShells[f[6]] {
+			if isInteractiveShell(f[6]) {
 				shellHomes[home] = true
 			}
 		})
 	}
-	for _, rel := range []string{"etc/group", "private/etc/group"} {
-		forEachField(filepath.Join(root, rel), func(f []string) {
+	for _, rel := range []string{"/etc/group", "/private/etc/group"} {
+		forEachField(root, rel, func(f []string) {
 			if len(f) < 3 {
 				return
 			}
@@ -86,13 +92,15 @@ func sortedKeys(m map[string]bool) []string {
 	return out
 }
 
-func forEachField(path string, fn func([]string)) {
-	f, err := os.Open(path)
+// forEachField reads through fsref.ReadBeneath rather than os.Open: the
+// account database is inside the image, and a hostile image can point it at the
+// examiner's own passwd file or at a FIFO.
+func forEachField(root, rel string, fn func([]string)) {
+	b, err := fsref.ReadBeneath(root, rel)
 	if err != nil {
 		return
 	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(bytes.NewReader(b))
 	for sc.Scan() {
 		line := sc.Text()
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -102,8 +110,14 @@ func forEachField(path string, fn func([]string)) {
 	}
 }
 
-// Known reports whether the database was populated at all. When it is empty
-// (no passwd file found) the no_user and no_group rules cannot be evaluated
-// meaningfully, and callers should say so rather than reporting every file as
-// orphaned.
-func (d *DB) Known() bool { return len(d.UIDs) > 0 }
+// KnownUsers and KnownGroups are answered separately.
+//
+// They come from different files, and either can be missing on its own. Gating
+// both on the passwd file alone means an image with a passwd but no group file
+// marks every file no_group, while one with a group but no passwd disables
+// no_group entirely -- opposite errors from the same conflation.
+func (d *DB) KnownUsers() bool  { return len(d.UIDs) > 0 }
+func (d *DB) KnownGroups() bool { return len(d.GIDs) > 0 }
+
+// Known reports whether anything at all was read.
+func (d *DB) Known() bool { return d.KnownUsers() || d.KnownGroups() }

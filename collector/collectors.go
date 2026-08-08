@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"uacscan/internal/content"
 	"uacscan/internal/fileattr"
@@ -337,13 +336,8 @@ func (c *fileCollector) copy(f *fsref.FileRef, ct content.Content) error {
 		if _, err := out.Write(buf); err != nil {
 			return content.Fatal(err)
 		}
-	} else if _, err := io.Copy(out, ct.Reader()); err != nil {
-		// A copy can fail either end. A read error is the source's problem and
-		// is recoverable; anything else means the destination.
-		if isSourceReadError(err) {
-			return err
-		}
-		return content.Fatal(err)
+	} else if err := copyTagging(out, ct.Reader()); err != nil {
+		return err
 	}
 	if err := out.Close(); err != nil {
 		return content.Fatal(err)
@@ -479,16 +473,30 @@ func (c *listCollector) ScanResults() (any, error) {
 	}, nil
 }
 
-// isSourceReadError reports whether a copy failure came from reading the
-// evidence rather than from writing the output.
+// copyTagging copies src to dst, reporting which end failed.
 //
-// The distinction decides whether the scan continues. A bad sector or an
-// unreadable file is the image's problem and is recorded; anything else during
-// a copy means the destination could not be written, which compromises the
-// acquisition and must stop it.
-func isSourceReadError(err error) bool {
-	return errors.Is(err, syscall.EIO) ||
-		errors.Is(err, syscall.EACCES) ||
-		errors.Is(err, syscall.EPERM) ||
-		errors.Is(err, content.ErrExpired)
+// io.Copy returns one undifferentiated error, and the errno cannot tell the
+// ends apart: a destination on a failing disk, an NFS mount or a FUSE
+// filesystem returns EIO, EACCES or EPERM exactly as an unreadable source
+// does. Classifying by errno therefore let a truncated copy be filed as an
+// evidence problem and the scan exit zero. Doing the loop by hand is the only
+// way to know which call failed.
+func copyTagging(dst io.Writer, src io.Reader) error {
+	buf := make([]byte, 128<<10)
+	for {
+		n, rerr := src.Read(buf)
+		if n > 0 {
+			if _, werr := dst.Write(buf[:n]); werr != nil {
+				// The destination failed: the acquisition is compromised.
+				return content.Fatal(werr)
+			}
+		}
+		if rerr != nil {
+			if errors.Is(rerr, io.EOF) {
+				return nil
+			}
+			// The source failed: recoverable, recorded, the walk continues.
+			return rerr
+		}
+	}
 }

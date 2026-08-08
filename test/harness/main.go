@@ -25,6 +25,7 @@ import (
 	"uacscan/internal/config"
 	"uacscan/internal/content"
 	"uacscan/internal/fsref"
+	"uacscan/internal/mounts"
 	"uacscan/internal/passwd"
 	"uacscan/internal/rules"
 	"uacscan/internal/spool"
@@ -231,6 +232,8 @@ func runScan(uacDir, artifactList, root, out string) (walk.Stats, map[string]boo
 		return walk.Stats{}, nil, err
 	}
 	accounts := passwd.Load(root)
+	// Everything the CLI sets, so that a passing comparison actually exercises
+	// these settings rather than leaving them at their zero values.
 	env := &rules.Env{
 		MountPoint: root,
 		Now:        time.Now(),
@@ -238,16 +241,23 @@ func runScan(uacDir, artifactList, root, out string) (walk.Stats, map[string]boo
 		// pin the same value here. Letting the two tools resolve the target
 		// independently could hand them different rule sets and turn a
 		// comparison failure into something meaningless.
-		OS:            targetos.Host(),
-		EnableMtime:   conf.EnableFindMtime,
-		EnableAtime:   conf.EnableFindAtime,
-		EnableCtime:   conf.EnableFindCtime,
-		HashAlgorithm: conf.HashAlgorithm,
-		UserHomes:     accounts.Homes,
-		OutputDir:     out,
+		OS:                 targetos.Host(),
+		EnableMtime:        conf.EnableFindMtime,
+		EnableAtime:        conf.EnableFindAtime,
+		EnableCtime:        conf.EnableFindCtime,
+		HashAlgorithm:      conf.HashAlgorithm,
+		ExcludeNamePattern: conf.ExcludeNamePattern,
+		MaxDepth:           conf.MaxDepth,
+		Mounts:             mounts.Load().Under(root),
+		UserHomes:          accounts.Homes,
+		ShellUserHomes:     accounts.ShellHomes,
+		OutputDir:          out,
 	}
-	if accounts.Known() {
-		env.UIDs, env.GIDs = accounts.UIDs, accounts.GIDs
+	if accounts.KnownUsers() {
+		env.UIDs = accounts.UIDs
+	}
+	if accounts.KnownGroups() {
+		env.GIDs = accounts.GIDs
 	}
 
 	var compiled []*rules.Rule

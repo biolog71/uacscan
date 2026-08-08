@@ -81,7 +81,7 @@ decision changes what gets collected:
 ```
 target os     : linux (detected from /mnt/image/etc/os-release)
 target os     : macos (specified with -s)
-target os     : linux (could not identify the image; assumed the host's -- pass -s to be sure)
+target os     :  (could not identify the image; collecting every artifact -- pass -s to narrow it)
 ```
 
 When the image cannot be identified the filter is disabled rather than applied

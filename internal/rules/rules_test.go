@@ -166,7 +166,8 @@ func TestNoUserReportsNothingWithoutAnAccountDatabase(t *testing.T) {
 
 func TestDateRangeOrsTheThreeTimestamps(t *testing.T) {
 	now := time.Now()
-	env := &Env{Now: now, StartDateDays: 7}
+	// UAC's shipped configuration: mtime and ctime, not atime.
+	env := &Env{Now: now, StartDateDays: 7, EnableMtime: true, EnableCtime: true}
 	r := &Rule{anchors: []anchor{{glob: CompileGlob("/")}}}
 
 	old := now.Add(-30 * 24 * time.Hour)
@@ -622,5 +623,51 @@ func TestResolveHistfileNormalisesTraversal(t *testing.T) {
 	}
 	if _, ok := ResolveHistfile("relative", "/home/alice"); ok {
 		t.Error("a relative value was accepted")
+	}
+}
+
+// With every enable_find_* disabled, UAC builds no date predicate at all, so
+// every file passes. Quietly substituting a default pair would silently
+// re-enable a filter the operator turned off.
+func TestNoEnabledTimestampsDisablesDateFiltering(t *testing.T) {
+	now := time.Now()
+	r := &Rule{anchors: []anchor{{glob: CompileGlob("/")}}}
+	old := now.Add(-365 * 24 * time.Hour)
+	f := &fsref.FileRef{Path: "/f", Name: "f", RawMode: 0100644, Mtime: old, Ctime: old, Atime: old}
+
+	env := &Env{Now: now, StartDateDays: 7} // all three flags false
+	if !r.Match(f, env) {
+		t.Error("a date range was applied although every timestamp field is disabled")
+	}
+}
+
+// UAC applies the configured depth only when the artifact does not set one; a
+// positive artifact value always wins, even if it is deeper.
+func TestMaxDepthPrecedenceMatchesUAC(t *testing.T) {
+	env := &Env{Now: time.Now(), MaxDepth: 2}
+	doc := &artifact.Doc{}
+
+	// No artifact depth: the configured one applies.
+	r, err := Compile(artifact.Entry{Collector: "file", Path: []string{"/var"}}, doc, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.hasMaxDepth || r.maxDepth != 2 {
+		t.Errorf("configured depth not applied: has=%v depth=%d", r.hasMaxDepth, r.maxDepth)
+	}
+
+	// A deeper artifact value wins; taking the tighter of the two would
+	// undercollect wherever an artifact deliberately asks to go deeper.
+	deeper := artifact.Entry{Collector: "file", Path: []string{"/var"}, MaxDepth: 5, HasMaxDepth: true}
+	r2, _ := Compile(deeper, doc, env)
+	if r2.maxDepth != 5 {
+		t.Errorf("artifact depth 5 was overridden by the configured 2: got %d", r2.maxDepth)
+	}
+
+	// A shallower artifact value also wins.
+	shallower := artifact.Entry{Collector: "file", Path: []string{"/var"}, MaxDepth: 1, HasMaxDepth: true}
+	r3, _ := Compile(shallower, doc, env)
+	if r3.maxDepth != 1 {
+		t.Errorf("artifact depth 1 was overridden: got %d", r3.maxDepth)
 	}
 }

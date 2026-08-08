@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -164,5 +165,59 @@ func TestHostnameUsesTheRunningSystemOnlyWhenCollectingFromRoot(t *testing.T) {
 	}
 	if got := Hostname("/"); got != host {
 		t.Errorf("live collection Hostname = %q, want %q", got, host)
+	}
+}
+
+// A hostile image can make any metadata file a symlink to the examiner's
+// filesystem. Reading it with os.Open followed the link and returned the
+// host's /etc/passwd as the "hostname".
+func TestHostnameRefusesASymlinkOutOfTheImage(t *testing.T) {
+	image := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(image, "etc"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc/passwd", filepath.Join(image, "etc/hostname")); err != nil {
+		t.Fatal(err)
+	}
+	if got := Hostname(image); got != "unknown" {
+		t.Errorf("read host data through a symlink: %q", got)
+	}
+}
+
+// And it can make one a FIFO, which os.Open blocks on for ever.
+func TestHostnameDoesNotBlockOnAFifo(t *testing.T) {
+	image := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(image, "etc"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(image, "etc/hostname"), 0644); err != nil {
+		t.Skip("mkfifo unavailable")
+	}
+	done := make(chan string, 1)
+	go func() { done <- Hostname(image) }()
+	select {
+	case got := <-done:
+		if got != "unknown" {
+			t.Errorf("Hostname = %q, want unknown", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Hostname blocked on a FIFO in the image")
+	}
+}
+
+// A hostname is used to build a directory name, so it must not be able to
+// carry separators or metacharacters out of the image.
+func TestHostnameFromTheImageIsSanitised(t *testing.T) {
+	image := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(image, "etc"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(image, "etc/hostname"),
+		[]byte("../../evil name\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := Hostname(image)
+	if strings.ContainsAny(got, `/\ `) {
+		t.Errorf("Hostname = %q, still carries path or space characters", got)
 	}
 }

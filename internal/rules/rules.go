@@ -339,11 +339,11 @@ func inDateRange(f *fsref.FileRef, env *Env) bool {
 		}
 		return true
 	}
-	// find ORs whichever timestamps are enabled. Enabling none would exclude
-	// everything, which is never what an operator means, so an empty selection
-	// falls back to UAC's default pair.
+	// find ORs whichever timestamps are enabled. With none enabled UAC builds
+	// no date predicate at all, so every file passes -- it does not quietly
+	// substitute a default pair, and neither does this.
 	if !env.EnableMtime && !env.EnableAtime && !env.EnableCtime {
-		return test(f.Mtime) || test(f.Ctime)
+		return true
 	}
 	return (env.EnableMtime && test(f.Mtime)) ||
 		(env.EnableCtime && test(f.Ctime)) ||
@@ -455,8 +455,12 @@ func Compile(e artifact.Entry, doc *artifact.Doc, env *Env) (*Rule, error) {
 	r.minSize, r.hasMinSize = e.MinFileSize, e.HasMinFileSize
 	r.maxSize, r.hasMaxSize = e.MaxFileSize, e.HasMaxFileSize
 	r.maxDepth, r.hasMaxDepth = e.MaxDepth, e.HasMaxDepth
-	// A configured max_depth caps every rule; the tighter of the two wins.
-	if env.MaxDepth > 0 && (!r.hasMaxDepth || env.MaxDepth < r.maxDepth) {
+	// UAC applies the configured depth only when the artifact does not set one:
+	//   if CONF_MAX_DEPTH > 0 && artifact_max_depth == 0 -> use CONF
+	// so a positive artifact value always wins. Taking the tighter of the two
+	// instead would undercollect wherever an artifact deliberately asks to go
+	// deeper than the default.
+	if env.MaxDepth > 0 && (!r.hasMaxDepth || r.maxDepth == 0) {
 		r.maxDepth, r.hasMaxDepth = env.MaxDepth, true
 	}
 	return r, nil
