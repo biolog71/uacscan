@@ -32,11 +32,12 @@ import (
 	"uacscan/internal/uacpath"
 	"uacscan/internal/walk"
 	"uacscan/test/fixture"
+	"uacscan/test/uacfull"
 )
 
 func main() {
 	var (
-		uacDir    = flag.String("uac", uacpath.Find(), "path to the UAC repository (default: $UAC_ROOT or a sibling checkout)")
+		uacDir    = flag.String("uac", "", "run against this UAC checkout instead of the embedded copy")
 		artifacts = flag.String("artifacts", defaultArtifacts, "comma-separated artifact list passed to both tools")
 		work      = flag.String("work", "", "working directory (default: a temporary one)")
 		keep      = flag.Bool("keep", false, "keep the working directory")
@@ -45,11 +46,13 @@ func main() {
 	)
 	flag.Parse()
 
-	if *uacDir == "" {
-		fmt.Fprintln(os.Stderr, "uacdiff: cannot find the UAC repository; pass -uac or set UAC_ROOT")
-		os.Exit(2)
+	resolved, why, err := ResolveUAC(*uacDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "uacdiff: %v\n", err)
+		os.Exit(1)
 	}
-	if err := run(*uacDir, *artifacts, *work, *image, *keep, *verbose); err != nil {
+	fmt.Printf("uac           : %s (%s)\n", resolved, why)
+	if err := run(resolved, *artifacts, *work, *image, *keep, *verbose); err != nil {
 		fmt.Fprintf(os.Stderr, "uacdiff: %v\n", err)
 		os.Exit(1)
 	}
@@ -132,6 +135,28 @@ func run(uacDir, artifactList, work, image string, keep, verbose bool) error {
 	}
 
 	return compare(uacResult, scanOut, root, verbose)
+}
+
+// ResolveUAC decides which UAC the comparison runs against.
+//
+// The embedded copy is the default, so the harness works on a machine that has
+// nothing but this repository and always compares against a known version. An
+// explicit -uac, or UAC_ROOT, switches to a checkout -- which is what you want
+// while changing UAC itself, at the cost of no longer knowing exactly which
+// version produced the result.
+func ResolveUAC(override string) (dir, why string, err error) {
+	if override != "" {
+		return override, "specified with -uac", nil
+	}
+	if r := uacpath.Find(); r != "" && os.Getenv("UAC_ROOT") != "" {
+		return r, "checkout from $UAC_ROOT", nil
+	}
+	d, err := uacfull.Dir()
+	if err != nil {
+		return "", "", fmt.Errorf("unpacking the embedded UAC: %w", err)
+	}
+	release, commit := uacfull.Version()
+	return d, fmt.Sprintf("embedded %s, commit %s", release, commit), nil
 }
 
 // runUAC invokes the shell implementation and returns its output directory.

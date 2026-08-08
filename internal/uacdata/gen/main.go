@@ -28,14 +28,19 @@ import (
 	"time"
 )
 
-// Only these subtrees are packed. The rest of the UAC repository is shell
-// implementation that uacscan does not read.
-var wanted = []string{"artifacts", "config", "profiles"}
+// dataSubtrees are the only parts uacscan itself reads. The rest of the UAC
+// repository is shell implementation it replaced.
+var dataSubtrees = []string{"artifacts", "config", "profiles"}
+
+// skipFull names what to leave out of a full pack: repository plumbing that the
+// shell tool never touches at runtime.
+var skipFull = map[string]bool{".git": true}
 
 func main() {
 	var (
 		uacDir = flag.String("uac", "", "path to the UAC repository (required)")
 		out    = flag.String("out", "internal/uacdata/uac.tar.gz", "archive to write")
+		mode   = flag.String("mode", "data", "data: artifacts, config and profiles only; full: the whole UAC tree, for the differential harness")
 	)
 	flag.Parse()
 
@@ -43,18 +48,23 @@ func main() {
 		fmt.Fprintln(os.Stderr, "gen: -uac is required")
 		os.Exit(2)
 	}
-	if err := build(*uacDir, *out); err != nil {
+	if *mode != "data" && *mode != "full" {
+		fmt.Fprintf(os.Stderr, "gen: unknown mode %q\n", *mode)
+		os.Exit(2)
+	}
+	if err := build(*uacDir, *out, *mode == "full"); err != nil {
 		fmt.Fprintf(os.Stderr, "gen: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func build(uacDir, out string) error {
+func build(uacDir, out string, full bool) error {
 	version, commit := provenance(uacDir)
 
 	type entry struct {
 		name string
 		data []byte
+		exec bool
 	}
 	var entries []entry
 
@@ -66,27 +76,48 @@ func build(uacDir, out string) error {
 		data: []byte(fmt.Sprintf("uac_version=%s\nuac_commit=%s\n", version, commit)),
 	})
 
-	for _, sub := range wanted {
+	roots := dataSubtrees
+	if full {
+		roots = []string{"."}
+	}
+	for _, sub := range roots {
 		root := filepath.Join(uacDir, sub)
 		if _, err := os.Stat(root); err != nil {
 			return fmt.Errorf("%s: %w", root, err)
 		}
 		err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() {
+			if err != nil {
 				return err
 			}
-			if !d.Type().IsRegular() {
+			rel, rerr := filepath.Rel(uacDir, p)
+			if rerr != nil {
+				return rerr
+			}
+			rel = filepath.ToSlash(rel)
+			if full && skipFull[strings.SplitN(rel, "/", 2)[0]] {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() || !d.Type().IsRegular() {
 				return nil
 			}
 			data, err := os.ReadFile(p)
 			if err != nil {
 				return err
 			}
-			rel, err := filepath.Rel(uacDir, p)
+			info, err := d.Info()
 			if err != nil {
 				return err
 			}
-			entries = append(entries, entry{name: filepath.ToSlash(rel), data: data})
+			// The executable bit is the only mode detail that matters: the
+			// harness runs ./uac and UAC runs the tools in bin/.
+			entries = append(entries, entry{
+				name: rel,
+				data: data,
+				exec: info.Mode()&0111 != 0,
+			})
 			return nil
 		})
 		if err != nil {
@@ -113,9 +144,13 @@ func build(uacDir, out string) error {
 
 	var total int64
 	for _, e := range entries {
+		mode := int64(0644)
+		if e.exec {
+			mode = 0755
+		}
 		hdr := &tar.Header{
 			Name:     e.name,
-			Mode:     0644,
+			Mode:     mode,
 			Size:     int64(len(e.data)),
 			Typeflag: tar.TypeReg,
 			ModTime:  time.Unix(0, 0).UTC(),
@@ -140,8 +175,14 @@ func build(uacDir, out string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("packed %d files (%.1f KiB) from UAC %s (%s) into %s (%.1f KiB)\n",
-		len(entries), float64(total)/1024, version, commit, out, float64(fi.Size())/1024)
+	execs := 0
+	for _, e := range entries {
+		if e.exec {
+			execs++
+		}
+	}
+	fmt.Printf("packed %d files (%d executable, %.1f KiB) from UAC %s (%s) into %s (%.1f KiB)\n",
+		len(entries), execs, float64(total)/1024, version, commit, out, float64(fi.Size())/1024)
 	return nil
 }
 

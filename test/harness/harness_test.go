@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"uacscan/internal/uacpath"
+	"uacscan/test/uacfull"
 )
 
 // TestDifferentialAgainstUAC is the integration test: it runs the real shell
@@ -47,11 +47,21 @@ func TestDifferentialAgainstRealTree(t *testing.T) {
 	}
 }
 
+// uacRepo returns the UAC the comparison runs against: the embedded copy
+// unless UAC_ROOT points at a checkout. Because it is embedded, these tests no
+// longer skip -- the differential comparison runs anywhere.
 func uacRepo(t *testing.T) string {
 	t.Helper()
-	r := uacpath.Find()
-	if r == "" {
-		t.Skip("UAC repository not found; set UAC_ROOT to enable the differential test")
+	dir, why, err := ResolveUAC("")
+	if err != nil {
+		t.Fatalf("no UAC available: %v", err)
 	}
-	return r
+	t.Logf("comparing against UAC: %s (%s)", dir, why)
+	return dir
+}
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	uacfull.Cleanup()
+	os.Exit(code)
 }

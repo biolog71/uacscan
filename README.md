@@ -157,22 +157,29 @@ go run ./test/harness -image /usr/share/doc -v
 The harness builds a fixture image (or takes `-image`), runs both tools over it,
 and reports every difference. It is also wired into `go test`.
 
-The harness needs a checkout of [UAC](https://github.com/tclahr/uac), because it
-runs the real shell implementation. It deliberately reads that checkout's
-artifacts for both sides of the comparison rather than the embedded copy, so
-the two tools are provably given the same definitions. It is found
-automatically when the two live side by side:
+A complete UAC tree is embedded for this, so the comparison runs on a machine
+that has nothing but this repository — nothing skips, and the version compared
+against is always known. That archive is separate from the one the shipped
+binary carries: `test/uacfull` holds the whole shell implementation including
+`bin/` (8.6 MB of precompiled tools for a dozen architectures), and nothing
+outside the harness imports it, so none of it reaches the `uacscan` executable,
+which stays at 3.7 MB.
 
-```
-parent/
-  uac/       <- github.com/tclahr/uac
-  uacscan/   <- this repository
-```
+Unlike the definitions archive this one really does unpack onto disk — you
+cannot exec a shell script out of an in-memory filesystem — into a temp
+directory, once per test binary, with the executable bit preserved.
 
-Otherwise set `UAC_ROOT=/path/to/uac`. Only the harness needs it — the parser
-and rule-compiler tests run against the embedded corpus and never skip — and the
-tests that do need it skip cleanly, so `go test ./...` works on a machine that
-has nothing but this repository.
+Both sides of the comparison read the same tree's artifacts, so the two tools
+are provably given the same definitions. `TestArtifactsAgreeBetweenTheTwoEmbeddedCopies`
+fails if the two archives ever drift apart, since that would quietly make the
+comparison say nothing about what the shipped binary collects.
+
+To compare against a working copy instead, set `UAC_ROOT=/path/to/uac` or pass
+`-uac`. Regenerate both archives after updating it:
+
+```bash
+go generate ./internal/uacdata ./test/uacfull
+```
 
 ## Design
 
