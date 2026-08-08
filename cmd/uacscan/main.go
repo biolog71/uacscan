@@ -20,6 +20,7 @@ import (
 	"uacscan/internal/passwd"
 	"uacscan/internal/rules"
 	"uacscan/internal/spool"
+	"uacscan/internal/targetos"
 	"uacscan/internal/uacdata"
 	"uacscan/internal/walk"
 )
@@ -39,6 +40,7 @@ func main() {
 		crossDev  = flag.Bool("cross-device", false, "allow the walk to leave the root filesystem")
 		bufLimit  = flag.Int64("buffer-limit", content.DefaultBufferLimit, "files at or below this size are buffered whole")
 		confPath  = flag.String("c", "", "uac.conf to load (default: <artifacts>/../config/uac.conf)")
+		targetOS  = flag.String("s", "", "operating system of the image ("+targetos.Names()+"); detected from the image if omitted")
 		verbose   = flag.Bool("v", false, "report progress and per-file errors")
 	)
 	flag.Parse()
@@ -60,14 +62,14 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(*mount, *outDir, *artDir, *include, *exclude, *excl, *confPath,
+	if err := run(*mount, *outDir, *artDir, *include, *exclude, *excl, *confPath, *targetOS,
 		*startDays, *endDays, *bufLimit, *crossDev, *verbose); err != nil {
 		fmt.Fprintf(os.Stderr, "uacscan: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(mount, outDir, artDir, include, exclude, excludePaths, confPath string,
+func run(mount, outDir, artDir, include, exclude, excludePaths, confPath, targetOS string,
 	startDays, endDays int, bufLimit int64, crossDev, verbose bool) error {
 
 	mount = strings.TrimSuffix(mount, "/")
@@ -93,6 +95,11 @@ func run(mount, outDir, artDir, include, exclude, excludePaths, confPath string,
 		return fmt.Errorf("no artifact definitions found in %s", source)
 	}
 
+	osTarget, osReason, err := targetos.Resolve(targetOS, mount)
+	if err != nil {
+		return err
+	}
+
 	accounts := passwd.Load(mount)
 	if !accounts.Known() && verbose {
 		fmt.Fprintf(os.Stderr, "warning: no passwd file under %s; no_user/no_group rules will be skipped\n", mount)
@@ -101,6 +108,7 @@ func run(mount, outDir, artDir, include, exclude, excludePaths, confPath string,
 	env := &rules.Env{
 		MountPoint:    mount,
 		Now:           time.Now(),
+		OS:            osTarget,
 		StartDateDays: startDays,
 		EndDateDays:   endDays,
 		EnableMtime:   conf.EnableFindMtime,
@@ -134,7 +142,7 @@ func run(mount, outDir, artDir, include, exclude, excludePaths, confPath string,
 		}
 	}
 	if len(compiled) == 0 {
-		return fmt.Errorf("no offline rules selected by %q", include)
+		return fmt.Errorf("no offline rules apply to %s selected by %q", osTarget, include)
 	}
 
 	store, err := spool.NewStore(outDir)
@@ -204,6 +212,7 @@ func run(mount, outDir, artDir, include, exclude, excludePaths, confPath string,
 
 	st := w.Stats()
 	fmt.Printf("definitions   : %s\n", source)
+	fmt.Printf("target os     : %s (%s)\n", osTarget, osReason)
 	fmt.Printf("mount point   : %s\n", mount)
 	fmt.Printf("rules         : %d\n", len(compiled))
 	fmt.Printf("files visited : %d\n", st.Files)

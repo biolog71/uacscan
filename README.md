@@ -41,13 +41,70 @@ go build -o uacscan ./cmd/uacscan
 No path to a UAC checkout is needed — the artifact definitions are compiled
 into the binary. Copy the executable to an examiner workstation and it works.
 
-Key flags: `-m` mount point, `-o` output directory, `-include`/`-exclude`
-artifact globs, `-start-date-days`/`-end-date-days` for the date range,
-`-buffer-limit` for the small-file threshold, `-version` to see which UAC
-corpus is baked in. To run against a newer or modified checkout instead of the
+Key flags: `-m` mount point, `-o` output directory, `-s` target operating
+system, `-include`/`-exclude` artifact globs, `-start-date-days`/
+`-end-date-days` for the date range, `-buffer-limit` for the small-file
+threshold, `-version` to see which UAC corpus is baked in. To run against a newer or modified checkout instead of the
 embedded copy, pass `-a /path/to/uac/artifacts` (which also switches `uac.conf`
 to that checkout's, so definitions and configuration never come from different
 places); `-c` overrides the config file on its own.
+
+## Target operating system
+
+Artifacts declare `supported_os`, and that declaration is honoured: a macOS-only
+artifact is not compiled for a Linux image. The corpus narrows accordingly.
+
+| Target | Offline rules | | Target | Offline rules |
+|---|---|---|---|---|
+| linux | 287 | | netbsd | 128 |
+| macos | 261 | | openbsd | 128 |
+| freebsd | 133 | | solaris | 117 |
+| netscaler | 111 | | aix | 104 |
+| esxi | 86 | | | |
+
+UAC determines this with `uname -s`, which reports the *examiner's* system — 
+correct live, wrong for a mounted image, which is why UAC makes you pass `-s`
+offline. uacscan inspects the image instead, looking for marker files
+(`etc/os-release`, `System/Library/CoreServices/SystemVersion.plist`,
+`bin/freebsd-version`, `etc/release`, and so on), and only falls back to the
+host when collecting from `/`. More specific systems win: a NetScaler image is
+also a FreeBSD image, and an ESXi image looks Linux-ish.
+
+`-s` overrides detection. Every run prints what it decided and why, because that
+decision changes what gets collected:
+
+```
+target os     : linux (detected from /mnt/image/etc/os-release)
+target os     : macos (specified with -s)
+target os     : linux (could not identify the image; assumed the host's -- pass -s to be sure)
+```
+
+When the image cannot be identified the filter is disabled rather than applied
+blindly — over-collecting beats silently dropping artifacts because a marker
+was missing.
+
+## Platforms
+
+Builds for every operating system UAC supports:
+
+| | |
+|---|---|
+| `darwin` | arm64, amd64 |
+| `linux` | amd64, arm64, 386 |
+| `freebsd`, `openbsd`, `netbsd` | amd64 |
+| `solaris` | amd64 |
+| `aix` | ppc64 |
+
+`statx` is Linux-only, so elsewhere `Resolve` falls through to `lstat`. That
+costs nothing on Darwin, FreeBSD and NetBSD, which report a birth time directly
+from `lstat` — Linux is the odd one out in needing `statx` for the bodyfile's
+crtime column. File capabilities (the `getcap` artifact) are a Linux concept and
+the xattr read is compiled out elsewhere; `supported_os` means that artifact is
+never selected off Linux anyway.
+
+Only Linux/amd64 is *verified* — the differential harness has to run on the
+platform under test, so the others are compile-checked but not compared against
+UAC.
 
 ## Embedded artifact definitions
 

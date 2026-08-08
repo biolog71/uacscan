@@ -17,6 +17,7 @@ import (
 	"uacscan/internal/passwd"
 	"uacscan/internal/rules"
 	"uacscan/internal/spool"
+	"uacscan/internal/targetos"
 	"uacscan/test/fixture"
 )
 
@@ -46,6 +47,7 @@ func setup(t *testing.T, artifactYAML string) *harness {
 	env := &rules.Env{
 		MountPoint:    root,
 		Now:           time.Now(),
+		OS:            targetos.Host(),
 		EnableMtime:   conf.EnableFindMtime,
 		EnableAtime:   conf.EnableFindAtime,
 		EnableCtime:   conf.EnableFindCtime,

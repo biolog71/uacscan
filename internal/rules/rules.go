@@ -14,6 +14,7 @@ import (
 
 	"uacscan/internal/artifact"
 	"uacscan/internal/fsref"
+	"uacscan/internal/targetos"
 )
 
 // Kind is the collector action a rule triggers.
@@ -40,6 +41,11 @@ func IsOffline(collector string) bool {
 type Env struct {
 	MountPoint string
 	Now        time.Time
+
+	// OS is the operating system of the image being collected from, used to
+	// skip artifacts that declare a supported_os not covering it. Unknown
+	// disables the filter rather than dropping everything.
+	OS targetos.OS
 
 	// Date range, in days before Now. Zero disables, matching UAC.
 	StartDateDays int
@@ -303,6 +309,12 @@ func Compile(e artifact.Entry, doc *artifact.Doc, env *Env) (*Rule, error) {
 	if e.IsFileList {
 		// Two-phase artifact: the path list is produced by parsing collected
 		// file contents, so it is not knowable before the walk.
+		return nil, nil
+	}
+	if !targetos.Supports(e.SupportedOS, env.OS) {
+		// The artifact does not apply to this system. Collecting it anyway
+		// would waste the walk and, worse, produce output an analyst would
+		// reasonably read as meaningful.
 		return nil, nil
 	}
 

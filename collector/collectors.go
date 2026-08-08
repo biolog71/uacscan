@@ -12,8 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
-	"unsafe"
 
 	"uacscan/internal/content"
 	"uacscan/internal/fsref"
@@ -309,26 +307,3 @@ func (c *fileCollector) copy(f *fsref.FileRef, ct content.Content) error {
 }
 
 func (c *fileCollector) ScanResults() (any, error) { return c.stream(), nil }
-
-// ---------------------------------------------------------------------------
-
-// getxattr reads one extended attribute. Used for security.capability, which
-// is what getcap(8) reports -- no subprocess required.
-func getxattr(path, attr string) ([]byte, error) {
-	p, err := syscall.BytePtrFromString(path)
-	if err != nil {
-		return nil, err
-	}
-	a, err := syscall.BytePtrFromString(attr)
-	if err != nil {
-		return nil, err
-	}
-	buf := make([]byte, 128)
-	r, _, e := syscall.Syscall6(syscall.SYS_LGETXATTR,
-		uintptr(unsafe.Pointer(p)), uintptr(unsafe.Pointer(a)),
-		uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)), 0, 0)
-	if e != 0 {
-		return nil, e
-	}
-	return buf[:r], nil
-}

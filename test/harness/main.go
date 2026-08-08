@@ -28,6 +28,7 @@ import (
 	"uacscan/internal/passwd"
 	"uacscan/internal/rules"
 	"uacscan/internal/spool"
+	"uacscan/internal/targetos"
 	"uacscan/internal/uacpath"
 	"uacscan/internal/walk"
 	"uacscan/test/fixture"
@@ -201,8 +202,13 @@ func runScan(uacDir, artifactList, root, out string) (walk.Stats, error) {
 	}
 	accounts := passwd.Load(root)
 	env := &rules.Env{
-		MountPoint:    root,
-		Now:           time.Now(),
+		MountPoint: root,
+		Now:        time.Now(),
+		// UAC defaults to the host's OS (it calls uname -s, even offline), so
+		// pin the same value here. Letting the two tools resolve the target
+		// independently could hand them different rule sets and turn a
+		// comparison failure into something meaningless.
+		OS:            targetos.Host(),
 		EnableMtime:   conf.EnableFindMtime,
 		EnableAtime:   conf.EnableFindAtime,
 		EnableCtime:   conf.EnableFindCtime,

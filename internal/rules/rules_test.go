@@ -8,6 +8,7 @@ import (
 
 	"uacscan/internal/artifact"
 	"uacscan/internal/fsref"
+	"uacscan/internal/targetos"
 	"uacscan/internal/uacdata"
 )
 
@@ -368,5 +369,78 @@ func TestUserHomeArtifactSkippedWhenImageHasNoAccounts(t *testing.T) {
 	bad := artifact.Entry{Source: "x.yaml", Collector: "file", Path: nil}
 	if _, err := Compile(bad, &artifact.Doc{}, env); err == nil {
 		t.Error("an entry with no path at all should still be an error")
+	}
+}
+
+func TestSupportedOSFiltersArtifacts(t *testing.T) {
+	doc := &artifact.Doc{}
+	linuxOnly := artifact.Entry{
+		Source: "system/getcap.yaml", Collector: "find",
+		Path: []string{"/"}, SupportedOS: []string{"linux"},
+	}
+	macOnly := artifact.Entry{
+		Source: "files/system/tcc.yaml", Collector: "file",
+		Path: []string{"/"}, SupportedOS: []string{"macos"},
+	}
+	everywhere := artifact.Entry{
+		Source: "bodyfile/bodyfile.yaml", Collector: "stat",
+		Path: []string{"/"}, SupportedOS: []string{"all"},
+	}
+
+	onLinux := &Env{Now: time.Now(), OS: targetos.Linux}
+	if r, _ := Compile(linuxOnly, doc, onLinux); r == nil {
+		t.Error("a linux artifact was skipped on linux")
+	}
+	if r, _ := Compile(macOnly, doc, onLinux); r != nil {
+		t.Error("a macos-only artifact was compiled for a linux image")
+	}
+	if r, _ := Compile(everywhere, doc, onLinux); r == nil {
+		t.Error("an [all] artifact was skipped")
+	}
+
+	onMac := &Env{Now: time.Now(), OS: targetos.MacOS}
+	if r, _ := Compile(macOnly, doc, onMac); r == nil {
+		t.Error("a macos artifact was skipped on macos")
+	}
+	if r, _ := Compile(linuxOnly, doc, onMac); r != nil {
+		t.Error("a linux-only artifact was compiled for a macos image")
+	}
+
+	// When the image could not be identified, filtering must not silently
+	// discard everything -- over-collecting beats collecting nothing.
+	unknown := &Env{Now: time.Now(), OS: targetos.Unknown}
+	for _, e := range []artifact.Entry{linuxOnly, macOnly, everywhere} {
+		if r, _ := Compile(e, doc, unknown); r == nil {
+			t.Errorf("%s was dropped although the target OS is unknown", e.Source)
+		}
+	}
+}
+
+// The corpus must actually narrow per platform, and every platform must still
+// have something to collect.
+func TestCorpusNarrowsPerOperatingSystem(t *testing.T) {
+	docs, errs := artifact.LoadFS(uacArtifacts(t))
+	if len(errs) > 0 {
+		t.Fatalf("corpus failed to parse: %v", errs)
+	}
+	counts := map[targetos.OS]int{}
+	for _, os := range targetos.All {
+		env := &Env{Now: time.Now(), OS: os, UserHomes: []string{"/root"}}
+		for _, d := range docs {
+			for _, e := range d.Artifacts {
+				if r, err := Compile(e, d, env); err == nil && r != nil {
+					counts[os]++
+				}
+			}
+		}
+	}
+	for _, os := range targetos.All {
+		t.Logf("%-10s %d offline rules", os, counts[os])
+		if counts[os] == 0 {
+			t.Errorf("no rules at all apply to %s", os)
+		}
+	}
+	if counts[targetos.Linux] == counts[targetos.MacOS] {
+		t.Error("linux and macos produced identical rule counts; supported_os is not filtering")
 	}
 }

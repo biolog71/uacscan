@@ -160,6 +160,9 @@ func mkdev(major, minor uint64) uint64 {
 		(minor&0xffffff00)<<12 | (minor & 0x000000ff)
 }
 
+// fillLstat is the portable path, used wherever statx is unavailable. The
+// timestamp fields are named differently on Darwin than everywhere else, so the
+// per-OS half lives in lstat_darwin.go / lstat_other.go.
 func (f *FileRef) fillLstat() error {
 	var st syscall.Stat_t
 	if err := syscall.Lstat(f.Real, &st); err != nil {
@@ -172,9 +175,7 @@ func (f *FileRef) fillLstat() error {
 	f.Ino = st.Ino
 	f.Dev = uint64(st.Dev)
 	f.Size = st.Size
-	f.Atime = time.Unix(st.Atim.Sec, st.Atim.Nsec)
-	f.Mtime = time.Unix(st.Mtim.Sec, st.Mtim.Nsec)
-	f.Ctime = time.Unix(st.Ctim.Sec, st.Ctim.Nsec)
+	f.fillTimes(&st)
 	return nil
 }
 

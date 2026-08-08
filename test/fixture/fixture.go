@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -54,6 +53,11 @@ func Build(root string) error {
 		return err
 	}
 	if err := write("etc/hostname", "fixture-host\n", 0644); err != nil {
+		return err
+	}
+	// Makes the tree identifiable as a Linux image, which is what drives
+	// supported_os filtering.
+	if err := write("etc/os-release", "ID=fixture\nNAME=\"Fixture Linux\"\n", 0644); err != nil {
 		return err
 	}
 	if err := write("etc/ssh/sshd_config", "PermitRootLogin no\n", 0644); err != nil {
@@ -158,7 +162,7 @@ func Build(root string) error {
 	}
 
 	// A FIFO: opening it without care would block the walk forever.
-	if err := syscall.Mkfifo(filepath.Join(root, "tmp/fifo"), 0644); err != nil {
+	if err := mkfifo(filepath.Join(root, "tmp/fifo"), 0644); err != nil {
 		return fmt.Errorf("mkfifo: %w", err)
 	}
 
