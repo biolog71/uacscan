@@ -351,8 +351,9 @@ A `HISTFILE` value is a string out of a file's contents. It is normalised
 first, so `/` means the *image* root and a leading `..` resolves back inside
 rather than climbing out. That alone is not enough — the kernel follows
 symlinks in intermediate components, so an image containing `/logs -> /` would
-turn `<mount>/logs/etc/shadow` into the examiner's own file — so every
-directory leading to the target is checked and a symlinked one is refused. The
+turn `<mount>/logs/etc/shadow` into the examiner's own file — so the path is
+also resolved under the mount with `openat2`'s `RESOLVE_BENEATH`, falling back
+to an `lstat` check of every ancestor where that syscall is unavailable. The
 copy destination is built from the same string and gets the same containment
 check, and output files are created with `O_NOFOLLOW` so a planted symlink
 cannot redirect collected evidence elsewhere.
@@ -367,10 +368,14 @@ collection can never be appended to another.
 
 ## Known limits
 
-- **`exclude_file_system` is Linux-only.** It reads `/proc/self/mounts`; other
-  platforms return an empty table, so those exclusions cannot be applied there.
-  It matters far more live than offline, where a mounted image rarely contains
-  pseudo filesystems and the device-boundary check already stops the walk.
+- **`exclude_file_system` covers Linux, Darwin and FreeBSD.** Linux reads
+  `/proc/self/mounts`; Darwin and FreeBSD use `getfsstat`. NetBSD, OpenBSD,
+  Solaris and AIX return an empty table — the standard library either does not
+  wrap the call there or names the struct fields differently, and guessing at
+  an ABI that cannot be tested from here would be worse than leaving the
+  exclusion unapplied and saying so. It matters far more live than offline,
+  where a mounted image rarely contains pseudo filesystems and the
+  device-boundary check already stops the walk.
 - **Only `linux/amd64` is verified.** Everything else is compile-checked; the
   differential harness has to run on the platform under test.
 - **Containment is checked, not pinned.** The symlink check on ancestor

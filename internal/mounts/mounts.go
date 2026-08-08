@@ -89,7 +89,12 @@ func Load() Table {
 	if t := parseProcMounts("/proc/self/mounts"); len(t) > 0 {
 		return t
 	}
-	return parseProcMounts("/etc/mtab")
+	if t := parseProcMounts("/etc/mtab"); len(t) > 0 {
+		return t
+	}
+	// Darwin and FreeBSD have no /proc/self/mounts; they answer through
+	// getfsstat(2).
+	return loadNative()
 }
 
 // parseProcMounts reads the fstab-shaped table Linux exposes.
