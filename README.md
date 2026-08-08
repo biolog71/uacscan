@@ -38,10 +38,15 @@ go build -o uacscan ./cmd/uacscan
 ./uacscan -m /mnt/image -o ./out -include 'bodyfile/*,system/*'
 ```
 
+`-o` is a *destination*; each run creates its own directory inside it, named
+`uacscan-<hostname>-<os>-<timestamp>` after UAC's own convention. The host name
+comes from the image, not the workstation.
+
 No path to a UAC checkout is needed — the artifact definitions are compiled
 into the binary. Copy the executable to an examiner workstation and it works.
 
-Key flags: `-m` mount point, `-o` output directory, `-s` target operating
+Key flags: `-m` mount point, `-o` destination directory,
+`-output-base-name` to name the run directory yourself, `-s` target operating
 system, `-include`/`-exclude` artifact globs, `-start-date-days`/
 `-end-date-days` for the date range, `-buffer-limit` for the small-file
 threshold, `-version` to see which UAC corpus is baked in. To run against a newer or modified checkout instead of the
@@ -105,6 +110,33 @@ never selected off Linux anyway.
 Only Linux/amd64 is *verified* — the differential harness has to run on the
 platform under test, so the others are compile-checked but not compared against
 UAC.
+
+## Concurrent collections
+
+Several collections can run at once — separate processes, separate images —
+and the results are unaffected. Verified rather than assumed: `/usr/share/man`
+and `/usr/share/doc` collected concurrently produce bodyfiles byte-identical by
+SHA-256 to the same two collected one after the other, and the test suite is
+clean under `-race` with four walkers running simultaneously in one process.
+
+Nothing is shared between runs. Every piece of per-scan state — the stat cache,
+the content broker, the collector context, the spool store — is constructed per
+walk, and the only package-level values are error sentinels, lookup tables and
+the read-only embedded corpus.
+
+The one way to break this used to be pointing two runs at the same output
+directory. The spool writers append in buffered chunks and a flush boundary
+falls mid-line, so two processes writing one bodyfile spliced records from
+different images into each other — 19 malformed lines out of 21,912 in a
+measured run, with the right total line count and no error reported. Evidence
+that is quietly wrong is the worst possible failure for this tool.
+
+That is why each run creates its own directory rather than taking a lock: a
+lock can go stale after a kill, whereas `os.Mkdir` simply fails on an existing
+directory, so the loser of a race moves to the next name. Two runs starting in
+the same second get `...-20260808153140` and `...-20260808153140-2`. The same
+command that produced those 19 corrupt lines now produces two clean
+directories.
 
 ## Embedded artifact definitions
 

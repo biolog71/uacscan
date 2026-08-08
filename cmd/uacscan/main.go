@@ -18,6 +18,7 @@ import (
 	"uacscan/internal/content"
 	"uacscan/internal/fsref"
 	"uacscan/internal/mounts"
+	"uacscan/internal/outdir"
 	"uacscan/internal/passwd"
 	"uacscan/internal/rules"
 	"uacscan/internal/spool"
@@ -29,7 +30,8 @@ import (
 func main() {
 	var (
 		mount     = flag.String("m", "/", "mount point of the image to collect from")
-		outDir    = flag.String("o", "", "output directory (required)")
+		outDir    = flag.String("o", "", "destination directory; a uniquely named run directory is created inside it (required)")
+		baseName  = flag.String("output-base-name", "", "name for the run directory (default: uacscan-<hostname>-<os>-<timestamp>)")
 		artDir    = flag.String("a", "", "override the embedded artifact definitions with a UAC artifacts directory")
 		extract   = flag.String("extract", "", "write the embedded UAC definitions to this directory and exit")
 		showVer   = flag.Bool("version", false, "print version information and exit")
@@ -63,14 +65,14 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(*mount, *outDir, *artDir, *include, *exclude, *excl, *confPath, *targetOS,
+	if err := run(*mount, *outDir, *baseName, *artDir, *include, *exclude, *excl, *confPath, *targetOS,
 		*startDays, *endDays, *bufLimit, *crossDev, *verbose); err != nil {
 		fmt.Fprintf(os.Stderr, "uacscan: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(mount, outDir, artDir, include, exclude, excludePaths, confPath, targetOS string,
+func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath, targetOS string,
 	startDays, endDays int, bufLimit int64, crossDev, verbose bool) error {
 
 	mount = strings.TrimSuffix(mount, "/")
@@ -99,6 +101,19 @@ func run(mount, outDir, artDir, include, exclude, excludePaths, confPath, target
 	osTarget, osReason, err := targetos.Resolve(targetOS, mount)
 	if err != nil {
 		return err
+	}
+
+	// Every run writes into its own freshly created directory. Two collections
+	// sharing one would interleave their spool writes mid-line and produce a
+	// bodyfile with records from both images spliced together -- the right
+	// number of lines, no error, and wrong evidence.
+	hostname := outdir.Hostname(mount)
+	if baseName == "" {
+		baseName = outdir.Name(hostname, string(osTarget), time.Now())
+	}
+	outDir, err := outdir.Create(dest, baseName)
+	if err != nil {
+		return fmt.Errorf("creating the output directory: %w", err)
 	}
 
 	// The mount table lets exclude_file_system be honoured. Only mounts at or
@@ -193,7 +208,7 @@ func run(mount, outDir, artDir, include, exclude, excludePaths, confPath, target
 	for _, p := range mountTable.PointsForTypes(conf.ExcludeFileSystem) {
 		excludePaths += "," + p
 	}
-	excludeGlobs := compileExcludes(excludePaths, outDir, mount)
+	excludeGlobs := compileExcludes(excludePaths, dest, mount)
 
 	w := &walk.Walker{
 		Root:         mount,
@@ -222,6 +237,8 @@ func run(mount, outDir, artDir, include, exclude, excludePaths, confPath, target
 	}
 
 	st := w.Stats()
+	fmt.Printf("output        : %s\n", outDir)
+	fmt.Printf("host          : %s\n", hostname)
 	fmt.Printf("definitions   : %s\n", source)
 	fmt.Printf("target os     : %s (%s)\n", osTarget, osReason)
 	if n := len(mountTable); n > 0 {
