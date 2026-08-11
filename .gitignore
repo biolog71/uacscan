@@ -5,3 +5,6 @@
 # harness working directories
 /work/
 *.out
+
+# agent scratch directory
+.idex/
