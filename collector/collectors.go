@@ -63,6 +63,25 @@ func (c *statCollector) InspectFile(path string) error {
 
 func (c *statCollector) ScanResults() (any, error) { return c.stream(), nil }
 
+// streamSpool replays this collector's results by reading its spool files back
+// from disk, so a scan of millions of files never holds them in memory.
+func (b *base) streamSpool() iter.Seq2[Result, error] {
+	return func(yield func(Result, error) bool) {
+		for _, e := range b.ctx.Store.Manifest() {
+			if e.Collector != b.rule.ID {
+				continue
+			}
+			for line, err := range spool.Lines(e.Path) {
+				if !yield(Result{Collector: b.rule.ID, Line: line}, err) {
+					return
+				}
+			}
+		}
+	}
+}
+
+// stream flushes the single writer the line-oriented collectors share, then
+// replays it. A collector that never wrote has nothing to replay.
 func (b *base) stream() iter.Seq2[Result, error] {
 	return func(yield func(Result, error) bool) {
 		if b.w == nil {
@@ -72,14 +91,9 @@ func (b *base) stream() iter.Seq2[Result, error] {
 			yield(Result{}, err)
 			return
 		}
-		for _, e := range b.ctx.Store.Manifest() {
-			if e.Collector != b.rule.ID {
-				continue
-			}
-			for line, err := range spool.Lines(e.Path) {
-				if !yield(Result{Collector: b.rule.ID, Line: line}, err) {
-					return
-				}
+		for r, err := range b.streamSpool() {
+			if !yield(r, err) {
+				return
 			}
 		}
 	}
@@ -204,17 +218,11 @@ func newDigest(name string) (hash.Hash, bool) {
 }
 
 func (c *hashCollector) digest(f *fsref.FileRef, ct content.Content) error {
-	var (
-		digests []digester
-		sinks   []io.Writer
-	)
+	var digests []digester
 	for _, a := range c.algos() {
-		h, ok := newDigest(a)
-		if !ok {
-			continue
+		if h, ok := newDigest(a); ok {
+			digests = append(digests, digester{name: a, h: h})
 		}
-		digests = append(digests, digester{name: a, h: h})
-		sinks = append(sinks, h)
 	}
 	if len(digests) == 0 {
 		return nil
@@ -224,13 +232,16 @@ func (c *hashCollector) digest(f *fsref.FileRef, ct content.Content) error {
 		for _, d := range digests {
 			d.h.Write(buf)
 		}
-	} else if _, err := io.Copy(io.MultiWriter(sinks...), ct.Reader()); err != nil {
-		return err
+	} else {
+		sinks := make([]io.Writer, len(digests))
+		for i, d := range digests {
+			sinks[i] = d.h
+		}
+		if _, err := io.Copy(io.MultiWriter(sinks...), ct.Reader()); err != nil {
+			return err
+		}
 	}
 
-	if c.writers == nil {
-		c.writers = map[string]*spool.Writer{}
-	}
 	name := c.rule.OutputFile
 	if name == "" {
 		name = "hashes"
@@ -263,19 +274,19 @@ func (c *hashCollector) Flush() error {
 	return nil
 }
 
+// ScanResults does not go through base.stream: a hash collector writes one
+// spool per algorithm, not the single one that stream flushes.
+//
+// It flushes its own writers rather than relying on the walker having done so.
+// The walker does call Flush before results are read, but a reader that gets
+// the ordering wrong would otherwise see a digest silently truncated at the
+// last buffer boundary -- a wrong hash is worse than a missing one, and
+// bufio.Flush on an already-flushed writer costs nothing.
 func (c *hashCollector) ScanResults() (any, error) {
-	return func(yield func(Result, error) bool) {
-		for _, e := range c.ctx.Store.Manifest() {
-			if e.Collector != c.rule.ID {
-				continue
-			}
-			for line, err := range spool.Lines(e.Path) {
-				if !yield(Result{Collector: c.rule.ID, Line: line}, err) {
-					return
-				}
-			}
-		}
-	}, nil
+	if err := c.Flush(); err != nil {
+		return nil, err
+	}
+	return c.streamSpool(), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +297,7 @@ type fileCollector struct {
 	base
 	// seen deduplicates hardlinks by (device, inode): a file with many links
 	// is stored once, not once per link.
-	seen map[[2]uint64]string
+	seen map[[2]uint64]bool
 }
 
 func (c *fileCollector) InspectFile(path string) error {
@@ -300,14 +311,11 @@ func (c *fileCollector) InspectFile(path string) error {
 	if !f.IsRegular() || !c.rule.Match(f, c.ctx.Env) {
 		return nil
 	}
-	if c.seen == nil {
-		c.seen = map[[2]uint64]string{}
-	}
 	key := [2]uint64{f.Dev, f.Ino}
-	if _, dup := c.seen[key]; dup && f.Nlink > 1 {
+	if c.seen[key] && f.Nlink > 1 {
 		return nil
 	}
-	c.seen[key] = f.Path
+	c.seen[key] = true
 
 	c.ctx.Broker.Want(c.rule.ID, func(ct content.Content) error {
 		return c.copy(f, ct)
@@ -322,12 +330,16 @@ func (c *fileCollector) copy(f *fsref.FileRef, ct content.Content) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dst), spool.OutputDirPerm); err != nil {
 		return content.Fatal(err)
 	}
 	// O_NOFOLLOW: a symlink sitting at the destination must not redirect
 	// collected evidence somewhere else.
-	out, err := fsref.CreateNoFollow(dst, 0644)
+	//
+	// 0600: the copy is of the image's file, and that file is routinely
+	// /etc/shadow or an SSH private key. It must not become readable to every
+	// user of the analysis machine merely by being collected.
+	out, err := fsref.CreateNoFollow(dst, spool.OutputFilePerm)
 	if err != nil {
 		return content.Fatal(err)
 	}
@@ -374,14 +386,11 @@ func (c *fileCollector) Finish() error {
 		if !f.IsRegular() {
 			continue
 		}
-		if c.seen == nil {
-			c.seen = map[[2]uint64]string{}
-		}
 		key := [2]uint64{f.Dev, f.Ino}
-		if _, dup := c.seen[key]; dup {
+		if c.seen[key] {
 			continue
 		}
-		c.seen[key] = f.Path
+		c.seen[key] = true
 
 		c.ctx.Broker.Want(c.rule.ID, func(ct content.Content) error {
 			return c.copy(f, ct)

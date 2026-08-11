@@ -6,9 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -27,25 +28,49 @@ import (
 	"uacscan/internal/walk"
 )
 
+// options is everything one collection run needs, as the command line
+// describes it.
+//
+// A struct rather than a positional parameter list: there were fourteen, nine
+// of them strings, and at that width a call site says nothing about which
+// argument is which while any two neighbours can be transposed without the
+// compiler noticing.
+type options struct {
+	Mount        string
+	Dest         string
+	BaseName     string
+	ArtifactDir  string
+	ConfPath     string
+	TargetOS     string
+	Include      string
+	Exclude      string
+	ExcludePaths string
+	StartDays    int
+	EndDays      int
+	BufferLimit  int64
+	CrossDevice  bool
+	Verbose      bool
+}
+
 func main() {
-	var (
-		mount     = flag.String("m", "/", "mount point of the image to collect from")
-		outDir    = flag.String("o", "", "destination directory; a uniquely named run directory is created inside it (required)")
-		baseName  = flag.String("output-base-name", "", "name for the run directory (default: uacscan-<hostname>-<os>-<timestamp>)")
-		artDir    = flag.String("a", "", "override the embedded artifact definitions with a UAC artifacts directory")
-		extract   = flag.String("extract", "", "write the embedded UAC definitions to this directory and exit")
-		showVer   = flag.Bool("version", false, "print version information and exit")
-		include   = flag.String("include", "*", "comma-separated globs selecting artifacts, e.g. 'bodyfile/*,system/*'")
-		exclude   = flag.String("exclude", "", "comma-separated globs of artifacts to skip")
-		startDays = flag.Int("start-date-days", 0, "only files changed within this many days (0 disables)")
-		endDays   = flag.Int("end-date-days", 0, "only files older than this many days (0 disables)")
-		excl      = flag.String("exclude-path", "/proc,/sys,/dev,/run", "comma-separated paths pruned from the walk")
-		crossDev  = flag.Bool("cross-device", false, "allow the walk to leave the root filesystem")
-		bufLimit  = flag.Int64("buffer-limit", content.DefaultBufferLimit, "files at or below this size are buffered whole")
-		confPath  = flag.String("c", "", "uac.conf to load (default: <artifacts>/../config/uac.conf)")
-		targetOS  = flag.String("s", "", "operating system of the image ("+targetos.Names()+"); detected from the image if omitted")
-		verbose   = flag.Bool("v", false, "report progress and per-file errors")
-	)
+	var o options
+	flag.StringVar(&o.Mount, "m", "/", "mount point of the image to collect from")
+	flag.StringVar(&o.Dest, "o", "", "destination directory; a uniquely named run directory is created inside it (required)")
+	flag.StringVar(&o.BaseName, "output-base-name", "", "name for the run directory (default: uacscan-<hostname>-<os>-<timestamp>)")
+	flag.StringVar(&o.ArtifactDir, "a", "", "override the embedded artifact definitions with a UAC artifacts directory")
+	flag.StringVar(&o.ConfPath, "c", "", "uac.conf to load (default: <artifacts>/../config/uac.conf)")
+	flag.StringVar(&o.TargetOS, "s", "", "operating system of the image ("+targetos.Names()+"); detected from the image if omitted")
+	flag.StringVar(&o.Include, "include", "*", "comma-separated globs selecting artifacts, e.g. 'bodyfile/*,system/*'")
+	flag.StringVar(&o.Exclude, "exclude", "", "comma-separated globs of artifacts to skip")
+	flag.StringVar(&o.ExcludePaths, "exclude-path", "/proc,/sys,/dev,/run", "comma-separated paths pruned from the walk")
+	flag.IntVar(&o.StartDays, "start-date-days", 0, "only files changed within this many days (0 disables)")
+	flag.IntVar(&o.EndDays, "end-date-days", 0, "only files older than this many days (0 disables)")
+	flag.Int64Var(&o.BufferLimit, "buffer-limit", content.DefaultBufferLimit, "files at or below this size are buffered whole")
+	flag.BoolVar(&o.CrossDevice, "cross-device", false, "allow the walk to leave the root filesystem")
+	flag.BoolVar(&o.Verbose, "v", false, "report progress and per-file errors")
+
+	extract := flag.String("extract", "", "write the embedded UAC definitions to this directory and exit")
+	showVer := flag.Bool("version", false, "print version information and exit")
 	flag.Parse()
 
 	if *showVer {
@@ -60,22 +85,19 @@ func main() {
 		}
 		return
 	}
-	if *outDir == "" {
+	if o.Dest == "" {
 		fmt.Fprintln(os.Stderr, "uacscan: -o is required")
 		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(*mount, *outDir, *baseName, *artDir, *include, *exclude, *excl, *confPath, *targetOS,
-		*startDays, *endDays, *bufLimit, *crossDev, *verbose); err != nil {
+	if err := run(o); err != nil {
 		fmt.Fprintf(os.Stderr, "uacscan: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath, targetOS string,
-	startDays, endDays int, bufLimit int64, crossDev, verbose bool) error {
-
-	mount = strings.TrimSuffix(mount, "/")
+func run(o options) error {
+	mount := strings.TrimSuffix(o.Mount, "/")
 	if mount == "" {
 		mount = "/"
 	}
@@ -85,7 +107,7 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 
 	// Definitions come from the copy baked into the binary unless the operator
 	// points at a checkout, so a collection needs nothing but the executable.
-	artFS, conf, source, err := loadDefinitions(artDir, confPath)
+	artFS, conf, source, err := loadDefinitions(o.ArtifactDir, o.ConfPath)
 	if err != nil {
 		return err
 	}
@@ -98,7 +120,7 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 		return fmt.Errorf("no artifact definitions found in %s", source)
 	}
 
-	osTarget, osReason, err := targetos.Resolve(targetOS, mount)
+	osTarget, osReason, err := targetos.Resolve(o.TargetOS, mount)
 	if err != nil {
 		return err
 	}
@@ -108,10 +130,11 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 	// bodyfile with records from both images spliced together -- the right
 	// number of lines, no error, and wrong evidence.
 	hostname := outdir.Hostname(mount)
+	baseName := o.BaseName
 	if baseName == "" {
 		baseName = outdir.Name(hostname, string(osTarget), time.Now())
 	}
-	outDir, err := outdir.Create(dest, baseName)
+	outDir, err := outdir.Create(o.Dest, baseName)
 	if err != nil {
 		return fmt.Errorf("creating the output directory: %w", err)
 	}
@@ -122,10 +145,10 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 	mountTable := mounts.Load().Under(mount)
 
 	accounts := passwd.Load(mount)
-	if osTarget == targetos.Unknown && verbose {
+	if osTarget == targetos.Unknown && o.Verbose {
 		fmt.Fprintln(os.Stderr, "warning: the image could not be identified; no artifacts will be filtered by operating system")
 	}
-	if !accounts.Known() && verbose {
+	if !accounts.Known() && o.Verbose {
 		fmt.Fprintf(os.Stderr, "warning: no passwd file under %s; no_user/no_group rules will be skipped\n", mount)
 	}
 
@@ -133,8 +156,8 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 		MountPoint:         mount,
 		Now:                time.Now(),
 		OS:                 osTarget,
-		StartDateDays:      startDays,
-		EndDateDays:        endDays,
+		StartDateDays:      o.StartDays,
+		EndDateDays:        o.EndDays,
 		EnableMtime:        conf.EnableFindMtime,
 		EnableAtime:        conf.EnableFindAtime,
 		EnableCtime:        conf.EnableFindCtime,
@@ -155,8 +178,8 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 		env.GIDs = accounts.GIDs
 	}
 
-	inc := splitGlobs(include)
-	exc := splitGlobs(exclude)
+	inc := splitGlobs(o.Include)
+	exc := splitGlobs(o.Exclude)
 
 	var compiled []*rules.Rule
 	for _, d := range docs {
@@ -175,7 +198,7 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 		}
 	}
 	if len(compiled) == 0 {
-		return fmt.Errorf("no offline rules apply to %s selected by %q", osTarget, include)
+		return fmt.Errorf("no offline rules apply to %s selected by %q", osTarget, o.Include)
 	}
 
 	store, err := spool.NewStore(outDir)
@@ -186,7 +209,7 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 
 	cache := fsref.NewCache(mount)
 	broker := content.NewBroker()
-	broker.BufferLimit = bufLimit
+	broker.BufferLimit = o.BufferLimit
 
 	ctx := &collector.Context{
 		Cache:      cache,
@@ -197,7 +220,7 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 	}
 	broker.OnError = func(path, consumer string, err error) {
 		ctx.RecordError(path, consumer, err)
-		if verbose {
+		if o.Verbose {
 			fmt.Fprintf(os.Stderr, "read error: %s (%s): %v\n", path, consumer, err)
 		}
 	}
@@ -211,23 +234,20 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 		cs = append(cs, c)
 	}
 
-	// The tool's own output must never be collected as evidence.
-	for _, p := range conf.ExcludePathPattern {
-		excludePaths += "," + p
-	}
-	// The globally excluded filesystem types prune for every rule.
-	for _, p := range mountTable.PointsForTypes(conf.ExcludeFileSystem) {
-		excludePaths += "," + p
-	}
-	excludeGlobs := compileExcludes(excludePaths)
+	// Everything pruned for every rule: what the operator asked to skip, what
+	// uac.conf excludes, and the mount points of the excluded filesystem types.
+	pruned := splitList(o.ExcludePaths)
+	pruned = append(pruned, conf.ExcludePathPattern...)
+	pruned = append(pruned, mountTable.PointsForTypes(conf.ExcludeFileSystem)...)
+	excludeGlobs := compileExcludes(pruned)
 
 	// The run's own output must never be collected, and a glob cannot express
 	// that reliably: the operator chooses the path, so it may contain glob
 	// metacharacters or be given relative to the working directory. Both the
 	// run directory and the destination are pruned by resolved absolute path.
 	skipReal := map[string]bool{}
-	for _, p := range []string{outDir, dest} {
-		if c := canonicalPath(p); c != "" {
+	for _, p := range []string{outDir, o.Dest} {
+		if c := fsref.Canonical(p); c != "" {
 			skipReal[c] = true
 		}
 	}
@@ -240,11 +260,11 @@ func run(mount, dest, baseName, artDir, include, exclude, excludePaths, confPath
 		Collectors:   cs,
 		ExcludePaths: excludeGlobs,
 		SkipReal:     skipReal,
-		CrossDevice:  crossDev,
+		CrossDevice:  o.CrossDevice,
 		Recorded:     ctx.RecordedErrors,
 		OnError: func(path string, err error) {
 			ctx.RecordError(path, "walk", err)
-			if verbose {
+			if o.Verbose {
 				fmt.Fprintf(os.Stderr, "walk error: %s: %v\n", path, err)
 			}
 		},
@@ -334,7 +354,9 @@ func extractTo(dir string) error {
 		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
 			return err
 		}
-		if err := os.WriteFile(full, data, 0644); err != nil {
+		// These are UAC's own definitions, not evidence: they are meant to be
+		// read and edited, so they keep ordinary permissions.
+		if err := os.WriteFile(full, data, 0644); err != nil { //nolint:gosec // definitions are public, not collected data
 			return err
 		}
 		n++
@@ -348,12 +370,21 @@ func extractTo(dir string) error {
 	return nil
 }
 
-func splitGlobs(s string) []rules.Glob {
-	var out []rules.Glob
+// splitList splits a comma-separated flag value, dropping blanks.
+func splitList(s string) []string {
+	out := []string{}
 	for _, p := range strings.Split(s, ",") {
 		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, rules.CompileGlob(p))
+			out = append(out, p)
 		}
+	}
+	return out
+}
+
+func splitGlobs(s string) []rules.Glob {
+	var out []rules.Glob
+	for _, p := range splitList(s) {
+		out = append(out, rules.CompileGlob(p))
 	}
 	return out
 }
@@ -375,7 +406,9 @@ func selected(source string, inc, exc []rules.Glob) bool {
 	return false
 }
 
-// compileExcludes builds the operator-supplied prune globs.
+// compileExcludes turns prune paths into globs, one for the path itself and
+// one for everything under it. Duplicates are dropped and the result sorted, so
+// the compiled set does not depend on the order the sources were appended in.
 //
 // The output directory is deliberately not here. It used to be, expressed as a
 // glob against the mount-relative path of the destination's *parent*, which
@@ -383,37 +416,16 @@ func selected(source string, inc, exc []rules.Glob) bool {
 // containing glob metacharacters was read as a pattern, and a relative
 // destination never matched the absolute paths the walk produces. It is pruned
 // by resolved path instead; see Walker.SkipReal.
-func compileExcludes(list string) []rules.Glob {
+func compileExcludes(paths []string) []rules.Glob {
 	set := map[string]bool{}
-	for _, p := range strings.Split(list, ",") {
+	for _, p := range paths {
 		if p = strings.TrimSpace(p); p != "" {
 			set[p] = true
 		}
 	}
-	keys := make([]string, 0, len(set))
-	for k := range set {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	out := make([]rules.Glob, 0, len(keys)*2)
-	for _, k := range keys {
-		out = append(out, rules.CompileGlob(k), rules.CompileGlob(k+"/*"))
+	out := make([]rules.Glob, 0, len(set)*2)
+	for _, p := range slices.Sorted(maps.Keys(set)) {
+		out = append(out, rules.CompileGlob(p), rules.CompileGlob(p+"/*"))
 	}
 	return out
-}
-
-// canonicalPath resolves a path to an absolute, symlink-free form for
-// comparison during the walk.
-func canonicalPath(p string) string {
-	if p == "" {
-		return ""
-	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return ""
-	}
-	if resolved, rerr := filepath.EvalSymlinks(abs); rerr == nil {
-		return resolved
-	}
-	return filepath.Clean(abs)
 }

@@ -2,6 +2,9 @@
 /uacscan
 /uacdiff
 
+# macOS directory metadata
+.DS_Store
+
 # harness working directories
 /work/
 *.out

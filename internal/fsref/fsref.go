@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -347,6 +348,27 @@ func Join(root, rel string) string {
 		return rel
 	}
 	return strings.TrimSuffix(root, "/") + rel
+}
+
+// Canonical resolves a path to an absolute, symlink-free form, for comparing
+// two paths that may be written differently.
+//
+// It is how the walk recognises its own output directory: that path is chosen
+// by the operator, so it may be relative, and it may be reached through a
+// symlink. A path that cannot be resolved -- it does not exist yet, or a
+// component is unreadable -- is returned cleaned, which is the best available
+// answer and never worse than the input.
+func Canonical(p string) string {
+	if p == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
 }
 
 // Rel strips the mount point, so recorded paths read /etc/passwd no matter

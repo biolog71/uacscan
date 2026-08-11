@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 
 	"uacscan/internal/content"
@@ -167,9 +168,9 @@ func New(r *rules.Rule, ctx *Context) (Collector, error) {
 	case rules.KindFind:
 		return &findCollector{base: base}, nil
 	case rules.KindHash:
-		return &hashCollector{base: base}, nil
+		return &hashCollector{base: base, writers: map[string]*spool.Writer{}}, nil
 	case rules.KindFile:
-		return &fileCollector{base: base}, nil
+		return &fileCollector{base: base, seen: map[[2]uint64]bool{}}, nil
 	case rules.KindList:
 		return &listCollector{base: base}, nil
 	}
@@ -193,10 +194,8 @@ func (b *base) ShouldSkipDir(path string) bool {
 }
 
 func baseName(p string) string {
-	for i := len(p) - 1; i >= 0; i-- {
-		if p[i] == '/' {
-			return p[i+1:]
-		}
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[i+1:]
 	}
 	return p
 }

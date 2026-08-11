@@ -10,6 +10,22 @@ import (
 	"time"
 )
 
+// A commented-out setting is not the configuration. Taking one would name the
+// output directory after a host the image was never called.
+func TestRcConfIgnoresCommentedHostnames(t *testing.T) {
+	image := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(image, "etc"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	conf := "# hostname=\"decommissioned\"\n#hostname=\"old-name\"\nhostname=\"real-host\"\n"
+	if err := os.WriteFile(filepath.Join(image, "etc/rc.conf"), []byte(conf), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if got := rcConfHostname(image, "/etc/rc.conf"); got != "real-host" {
+		t.Errorf("rcConfHostname = %q, want %q", got, "real-host")
+	}
+}
+
 func TestName(t *testing.T) {
 	now := time.Date(2026, 8, 8, 17, 4, 5, 0, time.UTC)
 	if got, want := Name("evidence-01", "linux", now), "uacscan-evidence-01-linux-20260808170405"; got != want {

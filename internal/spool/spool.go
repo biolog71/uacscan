@@ -9,6 +9,17 @@
 //
 // The line format is UAC's own, not JSON, so the output tree is byte-comparable
 // against the shell implementation and readable by the same downstream tools.
+//
+// # Divergence from UAC
+//
+// One difference is deliberate: control bytes in a path are escaped before a
+// record is written. UAC passes filenames through find(1) and stat(1) verbatim,
+// so a file whose name contains a newline splits its record in two and lets a
+// suspect fabricate evidence by naming a file. See escapeControl.
+//
+// The output is also written 0600 under 0700 directories rather than
+// world-readable, because a collection contains whatever the image did --
+// /etc/shadow, private keys, credential stores.
 package spool
 
 import (
@@ -44,7 +55,12 @@ type Writer struct {
 	rel   string
 }
 
+// WriteLine appends one record.
+//
+// Control bytes are escaped first, so that one call always produces exactly one
+// line. This is a deliberate divergence from UAC: see escapeControl.
 func (w *Writer) WriteLine(s string) error {
+	s = escapeControl(s)
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	n, err := w.w.WriteString(s)
@@ -73,7 +89,7 @@ func (w *Writer) Flush() error {
 
 func (w *Writer) Close() error {
 	if err := w.Flush(); err != nil {
-		w.f.Close()
+		_ = w.f.Close() // the flush error is the one worth reporting
 		return err
 	}
 	return w.f.Close()
@@ -112,6 +128,19 @@ func NewStore(root string) (*Store, error) {
 // reserveMarker is created exclusively to claim an output directory.
 const reserveMarker = ".uacscan-collection"
 
+// OutputFilePerm and OutputDirPerm keep a collection readable only by the
+// examiner who made it.
+//
+// The output is not ordinary program output: a collection contains /etc/shadow,
+// SSH private keys, browser credential stores and anything else the artifacts
+// asked for. Written 0644 under a 0755 directory, as it was, every local user
+// on a shared analysis workstation could read the contents of the image --
+// material the tool went to some length to read safely in the first place.
+const (
+	OutputFilePerm = 0600
+	OutputDirPerm  = 0700
+)
+
 // reserve claims root for this collection.
 //
 // Checking that a directory is empty and then creating it is two steps: two
@@ -119,7 +148,7 @@ const reserveMarker = ".uacscan-collection"
 // succeed, and later append into the same files. Creating a marker with O_EXCL
 // is one step, so exactly one caller can win.
 func reserve(root string) error {
-	if err := os.MkdirAll(root, 0755); err != nil {
+	if err := os.MkdirAll(root, OutputDirPerm); err != nil {
 		return err
 	}
 	entries, err := os.ReadDir(root)
@@ -135,7 +164,7 @@ func reserve(root string) error {
 	}
 
 	f, err := os.OpenFile(filepath.Join(root, reserveMarker),
-		os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		os.O_CREATE|os.O_EXCL|os.O_WRONLY, OutputFilePerm)
 	if err != nil {
 		if os.IsExist(err) {
 			return fmt.Errorf("output directory %s is already claimed by another collection", root)
@@ -157,7 +186,7 @@ func (s *Store) Open(collector, kind, dir, name string) (*Writer, error) {
 		return w, nil
 	}
 	full := filepath.Join(s.Root, rel)
-	if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(full), OutputDirPerm); err != nil {
 		return nil, err
 	}
 	// O_NOFOLLOW so that a symlink sitting where an output file should go
@@ -167,7 +196,7 @@ func (s *Store) Open(collector, kind, dir, name string) (*Writer, error) {
 	// what NewStore enforces.
 	fd, err := syscall.Open(full,
 		syscall.O_CREAT|syscall.O_WRONLY|syscall.O_APPEND|syscall.O_NOFOLLOW|syscall.O_CLOEXEC,
-		0644)
+		OutputFilePerm)
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: full, Err: err}
 	}
@@ -214,7 +243,9 @@ func (s *Store) Close() error {
 			firstErr = err
 		}
 		if empty {
-			os.Remove(filepath.Join(s.Root, rel))
+			// UAC removes empty outputs. A failure to remove one leaves a
+			// harmless zero-length file and must not mask a real write error.
+			_ = os.Remove(filepath.Join(s.Root, rel))
 		}
 	}
 	return firstErr
@@ -241,6 +272,66 @@ func Lines(path string) iter.Seq2[string, error] {
 			yield("", err)
 		}
 	}
+}
+
+// escapeControl renders control bytes printably, so that data taken from the
+// image cannot end a record early.
+//
+// A filename is attacker-controlled: Linux permits every byte in one except '/'
+// and NUL. Written raw into a line-oriented output, a name containing a newline
+// closes its record and opens another, so naming a file
+//
+//	evil\n0|/etc/cron.d/backdoor|99|-rwxrwxrwx|0|0|0|0|0|0|0
+//
+// puts a complete, valid mactime record for a file that never existed into the
+// bodyfile. It parses in Autopsy or log2timeline as genuine evidence, and
+// nothing downstream can tell it from a real one. The same trick reaches the
+// hash manifests, where a forged line can assert a known-good digest for a
+// system binary.
+//
+// This is a deliberate divergence from UAC, which inherits the raw behaviour
+// from find(1) and stat(1). The output is byte-compared against UAC's, so the
+// escaping is confined to bytes that cannot legitimately appear in a record:
+// anything below 0x20, plus DEL. Ordinary paths -- including spaces, brackets,
+// backslashes and UTF-8 -- pass through untouched, so the comparison is
+// unaffected in every case that is not already an attack.
+//
+// The name is escaped rather than dropped: a file named this way is itself
+// evidence, and the examiner should see it.
+func escapeControl(s string) string {
+	if !hasControl(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\n':
+			b.WriteString(`\n`)
+		case c == '\r':
+			b.WriteString(`\r`)
+		case c == '\t':
+			b.WriteString(`\t`)
+		case c < 0x20 || c == 0x7f:
+			// Anything else unprintable, including NUL and the ESC that would
+			// otherwise let a filename write escape sequences to the
+			// examiner's terminal when they cat the output.
+			fmt.Fprintf(&b, `\x%02x`, c)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
+
+func hasControl(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // SanitizeName mirrors UAC's output filename sanitiser: characters that cannot

@@ -12,8 +12,8 @@ package passwd
 import (
 	"bufio"
 	"bytes"
-	"regexp"
-	"sort"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -31,15 +31,27 @@ type DB struct {
 	ShellHomes []string
 }
 
-// nonInteractiveShell matches the same shells UAC's get_user_home_list.sh
-// excludes. It is suffix-anchored on purpose: an exact list of paths misses
+// nonInteractiveShells are the shells UAC's get_user_home_list.sh excludes.
+//
+// They are matched as suffixes on purpose: an exact list of paths misses
 // /usr/local/bin/false, /usr/local/sbin/nologin and every other packaging
 // variant, which would leave service accounts in a collection that asked for
-// them to be left out. The trailing alternative matches an empty shell field.
-var nonInteractiveShell = regexp.MustCompile(`(false|halt|nologin|shutdown|sync|git-shell)$|^$`)
+// them to be left out.
+var nonInteractiveShells = []string{"false", "halt", "nologin", "shutdown", "sync", "git-shell"}
 
+// isInteractiveShell reports whether a passwd shell field belongs to an account
+// someone can log in as. An empty field is not one.
 func isInteractiveShell(shell string) bool {
-	return !nonInteractiveShell.MatchString(strings.TrimSpace(shell))
+	shell = strings.TrimSpace(shell)
+	if shell == "" {
+		return false
+	}
+	for _, s := range nonInteractiveShells {
+		if strings.HasSuffix(shell, s) {
+			return false
+		}
+	}
+	return true
 }
 
 // Load reads <root>/etc/passwd and <root>/etc/group. Missing files are not an
@@ -78,18 +90,9 @@ func Load(root string) *DB {
 		})
 	}
 
-	db.Homes = sortedKeys(homes)
-	db.ShellHomes = sortedKeys(shellHomes)
+	db.Homes = slices.Sorted(maps.Keys(homes))
+	db.ShellHomes = slices.Sorted(maps.Keys(shellHomes))
 	return db
-}
-
-func sortedKeys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }
 
 // forEachField reads through fsref.ReadBeneath rather than os.Open: the

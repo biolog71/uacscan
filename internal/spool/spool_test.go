@@ -3,8 +3,96 @@ package spool
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// A filename is attacker-controlled data on a hostile image, and Linux allows
+// every byte in one except '/' and NUL -- including a newline. Written raw into
+// a line-oriented output, such a name ends the record early and starts a new
+// one, letting a suspect fabricate evidence by naming a file.
+//
+// The forged line here is a complete, valid mactime record. Before this was
+// fixed it appeared in the bodyfile as its own parseable entry, describing a
+// file that never existed.
+func TestALineCannotBeForgedByANewlineInAPath(t *testing.T) {
+	s, err := NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := s.Open("bodyfile/bodyfile#0", "bodyfile", "/bodyfile", "bodyfile.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := "0|/etc/cron.d/backdoor|99|-rwxrwxrwx|0|0|0|0|0|0|0"
+	if err := w.WriteLine("0|/etc/evil\n" + forged + "|1|-rw-r--r--|0|0|1|0|0|0|0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	m := s.Manifest()
+	if len(m) != 1 {
+		t.Fatalf("manifest has %d entries, want 1", len(m))
+	}
+	// One WriteLine call must produce exactly one line, whatever it contains.
+	if m[0].Lines != 1 {
+		t.Errorf("Lines = %d, want 1", m[0].Lines)
+	}
+
+	var got []string
+	for line, err := range Lines(m[0].Path) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, line)
+	}
+	if len(got) != 1 {
+		t.Fatalf("read back %d lines, want 1: %q", len(got), got)
+	}
+	if strings.HasPrefix(got[0], forged) {
+		t.Error("the forged record became a line of its own")
+	}
+	if strings.ContainsAny(got[0], "\n\r") {
+		t.Error("a raw newline survived into the output")
+	}
+	// The evidence must still be there, just neutralised, so an examiner can
+	// see the real name -- a file named this way is itself worth noticing.
+	if !strings.Contains(got[0], `\n`) {
+		t.Errorf("the newline was dropped rather than escaped: %q", got[0])
+	}
+}
+
+// The escaping must not disturb ordinary paths: the output is byte-compared
+// against UAC's, so a gratuitous difference would be a real regression.
+func TestOrdinaryPathsAreWrittenUnchanged(t *testing.T) {
+	for _, path := range []string{
+		"0|/etc/passwd|1|-rw-r--r--|0|0|100|1|2|3|0",
+		`0|/home/user/Backup (2024)/file [1].txt|2|-rw-r--r--|0|0|1|1|2|3|0`,
+		"0|/tmp/naïve-ファイル|3|-rw-r--r--|0|0|1|1|2|3|0",
+		`0|/tmp/back\slash|4|-rw-r--r--|0|0|1|1|2|3|0`,
+	} {
+		if got := escapeControl(path); got != path {
+			t.Errorf("escapeControl(%q) = %q, want it unchanged", path, got)
+		}
+	}
+}
+
+func TestControlBytesAreEscaped(t *testing.T) {
+	cases := map[string]string{
+		"a\nb":   `a\nb`,
+		"a\rb":   `a\rb`,
+		"a\x00b": `a\x00b`,
+		"a\tb":   `a\tb`,
+		"a\x1bb": `a\x1bb`, // an escape sequence must not reach a terminal raw
+	}
+	for in, want := range cases {
+		if got := escapeControl(in); got != want {
+			t.Errorf("escapeControl(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
 
 func TestWriteAndStreamBack(t *testing.T) {
 	s, err := NewStore(t.TempDir())

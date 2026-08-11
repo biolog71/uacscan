@@ -359,7 +359,9 @@ func LoadDir(root string) ([]*Doc, map[string]error) {
 func LoadFS(fsys fs.FS) ([]*Doc, map[string]error) {
 	var docs []*Doc
 	errs := map[string]error{}
-	fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
+	// The callback never returns an error, so neither can the walk: a file
+	// that cannot be read is recorded in errs and the rest still load.
+	_ = fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".yaml") {
 			return nil
 		}
@@ -369,7 +371,7 @@ func LoadFS(fsys fs.FS) ([]*Doc, map[string]error) {
 			return nil
 		}
 		doc, perr := Parse(f, p)
-		f.Close()
+		_ = f.Close() // read-only: nothing to fail on close
 		if perr != nil {
 			errs[p] = fmt.Errorf("%s: %w", p, perr)
 			return nil

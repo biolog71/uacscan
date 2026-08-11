@@ -61,24 +61,37 @@ func CleanImagePath(p string) (string, error) {
 // case it defends against: a forensic image is static, and mounted read-only
 // if the examiner is doing it properly.
 func ResolveBeneath(root, rel string) (*FileRef, error) {
-	cleaned, err := CleanImagePath(rel)
+	cleaned, err := containedPath(root, rel)
 	if err != nil {
 		return nil, err
 	}
-	real := Join(root, cleaned)
+	return Resolve(Join(root, cleaned), cleaned, strings.Count(strings.Trim(cleaned, "/"), "/"))
+}
 
-	if root != "" && root != "/" {
-		checked, err := checkBeneathKernel(root, cleaned)
-		if err != nil {
-			return nil, err
-		}
-		if !checked {
-			if err := checkBeneath(root, cleaned); err != nil {
-				return nil, err
-			}
+// containedPath cleans rel and verifies it stays inside root, returning the
+// cleaned image-relative path. The kernel answers first where openat2 exists;
+// checkBeneath is the portable fallback.
+//
+// A root of "" or "/" is the examiner's own filesystem, where there is nothing
+// to be contained within and no image to be hostile.
+func containedPath(root, rel string) (string, error) {
+	cleaned, err := CleanImagePath(rel)
+	if err != nil {
+		return "", err
+	}
+	if root == "" || root == "/" {
+		return cleaned, nil
+	}
+	checked, err := checkBeneathKernel(root, cleaned)
+	if err != nil {
+		return "", err
+	}
+	if !checked {
+		if err := checkBeneath(root, cleaned); err != nil {
+			return "", err
 		}
 	}
-	return Resolve(real, cleaned, strings.Count(strings.Trim(cleaned, "/"), "/"))
+	return cleaned, nil
 }
 
 // checkBeneath walks the components of rel below root, refusing any that is a
@@ -167,20 +180,9 @@ const MaxMetadataFile = 4 << 20
 // follows the link, and blocks. So the path is contained first, the open is
 // O_NOFOLLOW|O_NONBLOCK, and the result must be a regular file.
 func OpenBeneath(root, rel string) (*os.File, error) {
-	cleaned, err := CleanImagePath(rel)
+	cleaned, err := containedPath(root, rel)
 	if err != nil {
 		return nil, err
-	}
-	if root != "" && root != "/" {
-		checked, cerr := checkBeneathKernel(root, cleaned)
-		if cerr != nil {
-			return nil, cerr
-		}
-		if !checked {
-			if cerr := checkBeneath(root, cleaned); cerr != nil {
-				return nil, cerr
-			}
-		}
 	}
 	full := Join(root, cleaned)
 
@@ -193,13 +195,13 @@ func OpenBeneath(root, rel string) (*os.File, error) {
 
 	fi, err := f.Stat()
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	// A FIFO opened O_NONBLOCK succeeds and then blocks on read; a device could
 	// be worse. Only regular files carry the metadata these helpers want.
 	if !fi.Mode().IsRegular() {
-		f.Close()
+		_ = f.Close()
 		return nil, &os.PathError{Op: "open", Path: full,
 			Err: fmt.Errorf("not a regular file (%s)", fi.Mode().Type())}
 	}
@@ -225,26 +227,15 @@ func ExistsBeneath(root, rel string) bool {
 	if err != nil {
 		return false
 	}
-	f.Close()
+	_ = f.Close() // opened read-only, purely to prove it exists
 	return true
 }
 
 // DirExistsBeneath reports whether rel names an existing directory inside root.
 func DirExistsBeneath(root, rel string) bool {
-	cleaned, err := CleanImagePath(rel)
+	cleaned, err := containedPath(root, rel)
 	if err != nil {
 		return false
-	}
-	if root != "" && root != "/" {
-		checked, cerr := checkBeneathKernel(root, cleaned)
-		if cerr != nil {
-			return false
-		}
-		if !checked {
-			if cerr := checkBeneath(root, cleaned); cerr != nil {
-				return false
-			}
-		}
 	}
 	fi, err := os.Lstat(Join(root, cleaned))
 	return err == nil && fi.IsDir()

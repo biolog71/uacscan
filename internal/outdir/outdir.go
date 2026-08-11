@@ -20,12 +20,14 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"uacscan/internal/fsref"
+	"uacscan/internal/spool"
 )
 
 // TimestampLayout is the 14-digit form UAC uses.
@@ -54,7 +56,7 @@ func Create(dest, base string) (string, error) {
 	if dest == "" {
 		return "", fmt.Errorf("no destination directory given")
 	}
-	if err := os.MkdirAll(dest, 0755); err != nil {
+	if err := os.MkdirAll(dest, spool.OutputDirPerm); err != nil {
 		return "", err
 	}
 	base = sanitize(base)
@@ -68,7 +70,7 @@ func Create(dest, base string) (string, error) {
 			name = fmt.Sprintf("%s-%d", base, attempt+1)
 		}
 		path := filepath.Join(dest, name)
-		err := os.Mkdir(path, 0755)
+		err := os.Mkdir(path, spool.OutputDirPerm)
 		if err == nil {
 			return path, nil
 		}
@@ -122,36 +124,50 @@ func Hostname(mountPoint string) string {
 	return "unknown"
 }
 
-// firstLine reads through fsref.ReadBeneath rather than os.Open: the file is
-// named by the image, and a hostile one can make it a symlink to the
-// examiner's filesystem or a FIFO that never opens.
-func firstLine(root, rel string) string {
-	b, err := fsref.ReadBeneath(root, rel)
-	if err != nil {
-		return ""
+// lines reads a metadata file from inside the image and yields its trimmed
+// lines.
+//
+// It goes through fsref.ReadBeneath rather than os.Open: the file is named by
+// the image, and a hostile one can make it a symlink to the examiner's
+// filesystem or a FIFO that never opens. An unreadable file yields nothing,
+// which is what the callers want -- an absent hostname source is normal.
+func lines(root, rel string) iter.Seq[string] {
+	return func(yield func(string) bool) {
+		b, err := fsref.ReadBeneath(root, rel)
+		if err != nil {
+			return
+		}
+		sc := bufio.NewScanner(bytes.NewReader(b))
+		for sc.Scan() {
+			if !yield(strings.TrimSpace(sc.Text())) {
+				return
+			}
+		}
 	}
-	sc := bufio.NewScanner(bytes.NewReader(b))
-	for sc.Scan() {
-		if line := strings.TrimSpace(sc.Text()); line != "" && !strings.HasPrefix(line, "#") {
+}
+
+// firstLine returns the first line that is neither blank nor a comment.
+func firstLine(root, rel string) string {
+	for line := range lines(root, rel) {
+		if line != "" && !strings.HasPrefix(line, "#") {
 			return sanitize(line)
 		}
 	}
 	return ""
 }
 
+// rcConfHostname reads hostname="name" out of an rc.conf.
+//
+// Commented lines are skipped: a disabled setting is not the configuration, and
+// taking one would name the output directory after a host the image was not.
 func rcConfHostname(root, rel string) string {
-	b, err := fsref.ReadBeneath(root, rel)
-	if err != nil {
-		return ""
-	}
-	sc := bufio.NewScanner(bytes.NewReader(b))
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		v, ok := strings.CutPrefix(line, "hostname=")
-		if !ok {
+	for line := range lines(root, rel) {
+		if strings.HasPrefix(line, "#") {
 			continue
 		}
-		return sanitize(strings.Trim(strings.TrimSpace(v), `"'`))
+		if v, ok := strings.CutPrefix(line, "hostname="); ok {
+			return sanitize(strings.Trim(strings.TrimSpace(v), `"'`))
+		}
 	}
 	return ""
 }

@@ -9,7 +9,6 @@ package walk
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -133,7 +132,7 @@ func (w *Walker) Walk() error {
 			realPath := join(fr.real, de.Name())
 			relPath := join(fr.rel, de.Name())
 
-			if w.globallyExcluded(relPath) || w.SkipReal[canonical(realPath)] {
+			if w.globallyExcluded(relPath) || w.SkipReal[fsref.Canonical(realPath)] {
 				continue
 			}
 
@@ -237,19 +236,6 @@ func (w *Walker) reportErr(path string, err error) {
 	if w.OnError != nil {
 		w.OnError(path, err)
 	}
-}
-
-// canonical resolves a path for comparison against SkipReal. Symlinks are
-// resolved so that a link into the output directory is caught too; a path that
-// cannot be resolved is compared as given.
-func canonical(p string) string {
-	if abs, err := filepath.Abs(p); err == nil {
-		p = abs
-	}
-	if resolved, err := filepath.EvalSymlinks(p); err == nil {
-		return resolved
-	}
-	return filepath.Clean(p)
 }
 
 func join(dir, name string) string {
