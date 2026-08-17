@@ -92,6 +92,16 @@ func Resolve(real, rel string, depth int) (*FileRef, error) {
 }
 
 // statx buffer layout, from include/uapi/linux/stat.h. Offsets are fixed ABI.
+//
+// offDevMajor/offDevMinor deliberately point at stx_dev_major/stx_dev_minor
+// (0x88), not stx_rdev_major/stx_rdev_minor (0x80). The two are easy to
+// confuse: rdev is the device *represented by* a block/char special file
+// (zero for everything else), while dev is the device *containing* the file
+// -- the field that actually identifies which mount a file lives on. Reading
+// rdev here made every regular file and directory report Dev=0, which meant
+// the walker's cross-device check (ref.Dev != rootDev) could never be true:
+// -cross-device silently did nothing regardless of its value, and the walk
+// crossed onto every mounted filesystem it encountered no matter what.
 const (
 	offMask       = 0
 	offAttributes = 8
@@ -106,8 +116,10 @@ const (
 	offBtime      = 80
 	offCtime      = 96
 	offMtime      = 112
-	offDevMajor   = 128
-	offDevMinor   = 132
+	offRdevMajor  = 128 // device represented by a block/char special file
+	offRdevMinor  = 132
+	offDevMajor   = 136 // device containing the file -- this is what st_dev means
+	offDevMinor   = 140
 )
 
 func (f *FileRef) fillStatx() error {

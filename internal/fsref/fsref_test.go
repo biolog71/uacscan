@@ -2,7 +2,10 @@ package fsref
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -204,4 +207,76 @@ func TestStatxReportsBirthTimeWhereSupported(t *testing.T) {
 	if _, known := f.Immutable(); !known {
 		t.Log("filesystem does not report the immutable attribute")
 	}
+}
+
+// DevMatchesRealStat is the regression test for a real, previously-shipped
+// bug: offDevMajor/offDevMinor pointed at stx_rdev (the device a block/char
+// special file *represents*, zero for everything else) instead of stx_dev
+// (the device *containing* the file). Every regular file and directory
+// reported Dev=0, so the walker's cross-device check could never fire --
+// -cross-device silently did nothing no matter what it was set to.
+//
+// This can only be caught against a tree that spans more than one real
+// filesystem, which no synthetic fixture provides, so the test is best-effort:
+// it looks for a second mount point among common locations and skips if none
+// is found, rather than asserting anything false-positive on a single-device
+// CI runner.
+func TestDevMatchesRealStat(t *testing.T) {
+	if sysStatx == 0 {
+		t.Skip("no statx on this platform")
+	}
+
+	rootDev := statDev(t, "/")
+
+	// Every file on the same device as / must report the same Dev,
+	// regardless of which directory it lives in.
+	f, err := Resolve("/", "/", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Dev != rootDev {
+		t.Errorf("Dev for / = %d, want %d (from stat -c %%d)", f.Dev, rootDev)
+	}
+
+	for _, candidate := range []string{"/boot", "/boot/efi", "/proc", "/sys", "/dev"} {
+		if _, err := os.Stat(candidate); err != nil {
+			continue
+		}
+		otherDev := statDev(t, candidate)
+		if otherDev == rootDev {
+			continue // same filesystem as /; not useful for this check
+		}
+		got, err := Resolve(candidate, candidate, 0)
+		if err != nil {
+			continue
+		}
+		if got.Dev == 0 {
+			t.Errorf("%s: Dev decoded as 0; the stx_dev/stx_rdev offsets are swapped again", candidate)
+		}
+		if got.Dev != otherDev {
+			t.Errorf("%s: Dev = %d, want %d (from stat -c %%d, differs from root's %d)",
+				candidate, got.Dev, otherDev, rootDev)
+		}
+		if got.Dev == rootDev {
+			t.Errorf("%s: Dev matches root (%d) despite being on a different real filesystem",
+				candidate, rootDev)
+		}
+		return // found one genuine cross-device pair; that is enough to prove the fix
+	}
+	t.Skip("no second mount point found among common locations; cannot exercise the cross-device path")
+}
+
+// statDev shells out to the system's own stat(1) as an independent oracle,
+// so this test does not just check the code against itself.
+func statDev(t *testing.T, path string) uint64 {
+	t.Helper()
+	out, err := exec.Command("stat", "-c", "%d", path).Output()
+	if err != nil {
+		t.Skipf("system stat(1) unavailable: %v", err)
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		t.Fatalf("parsing stat output %q: %v", out, err)
+	}
+	return n
 }

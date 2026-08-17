@@ -197,6 +197,10 @@ func run(o options) error {
 			}
 		}
 	}
+	// When both bodyfile2filelists.yaml and bodyfile/bodyfile.yaml were
+	// selected, drop the standalone artifacts it shadows in a real UAC run --
+	// see rules.ApplyBodyfileListsShadowing for exactly which ones and why.
+	compiled = rules.ApplyBodyfileListsShadowing(compiled)
 	if len(compiled) == 0 {
 		return fmt.Errorf("no offline rules apply to %s selected by %q", osTarget, o.Include)
 	}

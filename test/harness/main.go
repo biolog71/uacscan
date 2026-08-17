@@ -62,6 +62,7 @@ func main() {
 // The offline artifacts that exercise all four collectors without producing
 // output so large that a disagreement is unreadable.
 const defaultArtifacts = "bodyfile/bodyfile.yaml," +
+	"system/bodyfile2filelists.yaml," +
 	"system/suid.yaml,system/sgid.yaml," +
 	"system/world_writable_files.yaml,system/group_writable_files.yaml," +
 	"system/hidden_files.yaml,system/hidden_directories.yaml," +
@@ -275,6 +276,7 @@ func runScan(uacDir, artifactList, root, out string) (walk.Stats, map[string]boo
 			}
 		}
 	}
+	compiled = rules.ApplyBodyfileListsShadowing(compiled)
 	if len(compiled) == 0 {
 		return walk.Stats{}, nil, fmt.Errorf("no rules selected")
 	}
@@ -384,6 +386,9 @@ func compare(uacDir, scanDir, root string, twoPhase map[string]bool, verbose boo
 		"system/user_name_unknown_files.txt", "system/group_name_unknown_files.txt",
 		"system/user_name_unknown_directories.txt", "system/group_name_unknown_directories.txt",
 		"system/world_writable_directories.txt", "system/group_writable_directories.txt",
+		// These two have no standalone-artifact fallback at all -- only
+		// bodyfile2filelists.sh (and its native reimplementation) produce them.
+		"system/world_writable_not_sticky_directories.txt", "system/socket_files.txt",
 		// These reproduce getcap and lsattr output, so they are compared as
 		// whole lines rather than as bare paths.
 		"system/getcap.txt", "system/immutable_files.txt",

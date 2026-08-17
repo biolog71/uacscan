@@ -358,6 +358,9 @@ func Compile(e artifact.Entry, doc *artifact.Doc, env *Env) (*Rule, error) {
 		return nil, nil
 	}
 	if e.Collector == "command" {
+		if r := compileBodyfileLists(e, doc); r != nil {
+			return r, nil
+		}
 		return compileList(e, doc, env)
 	}
 	if !IsOffline(e.Collector) {

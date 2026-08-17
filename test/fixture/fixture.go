@@ -139,6 +139,15 @@ func Build(root string) error {
 	if err := os.Chmod(filepath.Join(root, "tmp"), 0777|os.ModeSticky); err != nil {
 		return err
 	}
+	// A world-writable directory without the sticky bit, distinct from /tmp
+	// above: the one real difference between world_writable_directories and
+	// world_writable_not_sticky_directories is exactly this bit.
+	if err := mk("var/spool/incoming", 0755); err != nil {
+		return err
+	}
+	if err := os.Chmod(filepath.Join(root, "var/spool/incoming"), 0777); err != nil {
+		return err
+	}
 
 	// Hidden files and directories.
 	if err := write(".hidden_root_file", "hidden\n", 0644); err != nil {

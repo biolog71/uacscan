@@ -378,15 +378,80 @@ collection can never be appended to another.
   device-boundary check already stops the walk.
 - **Only `linux/amd64` is verified.** Everything else is compile-checked; the
   differential harness has to run on the platform under test.
-- **Containment is checked, not pinned.** The symlink check on ancestor
-  directories is an `lstat` rather than a descent through held descriptors, so
-  it is theoretically racy against something mutating the image mid-scan. A
-  forensic image is static and should be mounted read-only; `openat2` with
-  `RESOLVE_BENEATH` would close the gap on recent Linux at the cost of working
-  nowhere else.
+- **Containment is checked, not pinned.** On Linux 5.6+ the check is a single
+  `openat2` with `RESOLVE_BENEATH`; elsewhere (and on older kernels) it falls
+  back to an `lstat` of every ancestor directory. Either way it is a check
+  followed by a separate open by path, so it is theoretically racy against
+  something mutating the image mid-scan. A forensic image is static and should
+  be mounted read-only, which is what makes that acceptable.
 - **`command` collectors are out of scope** by design — 661 entries that
-  execute on a live system, which no filesystem walk can stand in for. The
-  HISTFILE extraction above is the one exception, because it only reads files.
+  execute on a live system, which no filesystem walk can stand in for. Two
+  exceptions read only files a walk already has in hand: the HISTFILE
+  extraction above, and `bodyfile2filelists.sh`, described below.
+
+## Bodyfile-derived classification
+
+`system/bodyfile2filelists.yaml` is a `command` collector, but a specific one
+worth reimplementing rather than skipping. Its script classifies every
+bodyfile entry into fourteen categories — sockets, hidden files/directories,
+suid/sgid, world- and group-writable files/directories (plus a non-sticky
+subset of world-writable directories), and files/directories owned by an
+unknown user or group — in one pass over the bodyfile. That is the same idea
+this whole project is built on, just applied by UAC to a file it had to write
+first. uacscan applies the identical logic per file during the walk itself, so
+no bodyfile ever needs to be written and re-read for it.
+
+This was not a proactive design choice — it came from running a real
+acquisition against a live root filesystem and diffing it against UAC. Two
+categories were off by roughly five orders of magnitude:
+`world_writable_files.txt` had 7 entries from UAC and 744,158 from uacscan;
+`group_writable_files.txt` had 54,964 versus 744,847. The permission-bit
+decoding underneath all of this was correct — verified directly against a
+flagged file's real mode. The actual cause was structural: in a real UAC run,
+`bodyfile2filelists.yaml` always runs before the twelve standalone per-category
+YAML artifacts, and each of those is condition-gated to skip once
+bodyfile2filelists.sh has already written its output file —
+
+```
+condition: if [ ! -f ".../world_writable_files.txt" ]; then true; else false; fi
+```
+
+— so in a real run they never execute. That matters because
+`system/world_writable_files.yaml` declares `permissions: [-0004]` (world-READ)
+and `system/group_writable_files.yaml` declares `[-0040]` (group-READ), not the
+write bits their names promise; bodyfile2filelists.sh's own logic checks the
+write bits correctly. This looks like a dormant, long-unnoticed inconsistency
+in upstream UAC's own artifact corpus — invisible in normal operation because
+the artifacts that would expose it never run, and only surfaced here because
+uacscan, having no shell-condition evaluator, ran them literally.
+
+Rather than build a general evaluator for arbitrary `condition:` clauses,
+uacscan encodes this one specific, verified dependency directly: when both
+`bodyfile2filelists.yaml` and `bodyfile/bodyfile.yaml` are selected, the twelve
+shadowed artifacts are dropped and bodyfile2filelists' own classification wins.
+If `bodyfile2filelists.yaml` is selected without `bodyfile/bodyfile.yaml`, UAC's
+own condition on the artifact itself — `if [ -s bodyfile.txt ]` — would be
+false, so uacscan drops its native rule instead and lets the standalone
+artifacts run, matching that fallback path exactly, wrong permission bits and
+all.
+
+## Cross-device pruning
+
+`-cross-device` (default `false`) is meant to keep a scan on one filesystem.
+Until this was found the same way as the classification bug above — a real
+acquisition, diffed against UAC — it did nothing regardless of its value: the
+statx offsets used for the containing device read `stx_rdev_major/minor`
+(0x80, the device *represented by* a block/char special file, zero for
+everything else) instead of `stx_dev_major/minor` (0x88, the device
+*containing* the file). Every regular file and directory reported `Dev=0`, so
+the walker's `ref.Dev != rootDev` check could never be true. It happened not to
+change that particular comparison's numbers, because UAC's own `find` never
+passes `-xdev` either and so crosses mount points by default too — but for the
+tool's actual use case, mounting a forensic image and *not* wanting to wander
+onto the examiner's live host filesystem, a silently inert flag is a real
+problem. Fixed and covered by a test that looks for a genuine second mount
+point on the machine running the tests and confirms `Dev` differs across it,
+skipping rather than false-passing where none is found.
 
 ## License
 

@@ -173,6 +173,8 @@ func New(r *rules.Rule, ctx *Context) (Collector, error) {
 		return &fileCollector{base: base, seen: map[[2]uint64]bool{}}, nil
 	case rules.KindList:
 		return &listCollector{base: base}, nil
+	case rules.KindBodyfileLists:
+		return &bodyfileListsCollector{base: base, writers: map[string]*spool.Writer{}}, nil
 	}
 	return nil, fmt.Errorf("unknown collector kind %q", r.Kind)
 }
