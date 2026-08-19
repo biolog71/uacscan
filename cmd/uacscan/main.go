@@ -9,6 +9,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -48,6 +49,7 @@ type options struct {
 	StartDays    int
 	EndDays      int
 	BufferLimit  int64
+	Workers      int
 	CrossDevice  bool
 	Verbose      bool
 }
@@ -66,6 +68,8 @@ func main() {
 	flag.IntVar(&o.StartDays, "start-date-days", 0, "only files changed within this many days (0 disables)")
 	flag.IntVar(&o.EndDays, "end-date-days", 0, "only files older than this many days (0 disables)")
 	flag.Int64Var(&o.BufferLimit, "buffer-limit", content.DefaultBufferLimit, "files at or below this size are buffered whole")
+	flag.IntVar(&o.Workers, "workers", runtime.NumCPU(),
+		"files whose content is read, hashed and copied concurrently (1 = fully serial)")
 	flag.BoolVar(&o.CrossDevice, "cross-device", false, "allow the walk to leave the root filesystem")
 	flag.BoolVar(&o.Verbose, "v", false, "report progress and per-file errors")
 
@@ -214,6 +218,7 @@ func run(o options) error {
 	cache := fsref.NewCache(mount)
 	broker := content.NewBroker()
 	broker.BufferLimit = o.BufferLimit
+	broker.Workers = o.Workers
 
 	ctx := &collector.Context{
 		Cache:      cache,

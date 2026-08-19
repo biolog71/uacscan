@@ -1,8 +1,10 @@
 package uacdata
 
 import (
+	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -142,6 +144,17 @@ func TestEmbeddedMatchesCheckout(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The comparison has to use the same notion of "what belongs in the
+	// archive" as the generator, which packs git's tracked file list rather
+	// than whatever happens to be sitting in the directory. Walking the
+	// filesystem instead would fail the moment anyone left an untracked file
+	// in the checkout -- a scratch profile, an editor backup -- reporting a
+	// stale corpus when nothing about the corpus had changed.
+	tracked, err := trackedFiles(root)
+	if err != nil {
+		t.Skipf("cannot list tracked files in %s: %v", root, err)
+	}
+
 	var missing, differing, extra int
 	onDisk := map[string]bool{}
 	for _, sub := range []string{"artifacts", "config", "profiles"} {
@@ -154,6 +167,9 @@ func TestEmbeddedMatchesCheckout(t *testing.T) {
 				return nil
 			}
 			rel = filepath.ToSlash(rel)
+			if !tracked[rel] {
+				return nil // untracked, so deliberately not embedded
+			}
 			onDisk[rel] = true
 
 			want, err := os.ReadFile(p)
@@ -191,6 +207,27 @@ func TestEmbeddedMatchesCheckout(t *testing.T) {
 	})
 	if missing+differing+extra > 0 {
 		t.Errorf("embedded corpus is stale (%d missing, %d differing, %d removed); "+
-			"run: go generate ./internal/uacdata", missing, differing, extra)
+			"run: go generate ./test/uacfull ./internal/uacdata", missing, differing, extra)
 	}
+}
+
+// trackedFiles lists the files git tracks in dir, matching how the generator
+// decides what to pack.
+func trackedFiles(dir string) (map[string]bool, error) {
+	cmd := exec.Command("git", "ls-files", "-z")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	files := map[string]bool{}
+	for _, name := range strings.Split(string(out), "\x00") {
+		if name != "" {
+			files[name] = true
+		}
+	}
+	if len(files) == 0 {
+		return nil, errors.New("no tracked files")
+	}
+	return files, nil
 }

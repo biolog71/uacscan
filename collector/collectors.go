@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"uacscan/internal/content"
 	"uacscan/internal/fileattr"
@@ -227,42 +228,91 @@ func (c *hashCollector) digest(f *fsref.FileRef, ct content.Content) error {
 	if len(digests) == 0 {
 		return nil
 	}
-	// One pass over the bytes feeds every digest.
+
+	// The bulk: one pass over the bytes feeds every digest. This is the part
+	// worth parallelising, so it stays here in the worker.
 	if buf, ok := ct.Bytes(); ok {
-		for _, d := range digests {
-			d.h.Write(buf)
-		}
-	} else {
-		sinks := make([]io.Writer, len(digests))
-		for i, d := range digests {
-			sinks[i] = d.h
-		}
-		if _, err := io.Copy(io.MultiWriter(sinks...), ct.Reader()); err != nil {
-			return err
-		}
+		hashChunk(digests, buf)
+	} else if err := hashStream(digests, ct.Reader()); err != nil {
+		return err
 	}
 
 	name := c.rule.OutputFile
 	if name == "" {
 		name = "hashes"
 	}
-	for _, d := range digests {
-		w, ok := c.writers[d.name]
-		if !ok {
-			var err error
-			w, err = c.ctx.Store.Open(c.rule.ID, "hashes", c.rule.OutputDir, name+"."+d.name)
-			if err != nil {
+	// The tail: appending one line per algorithm. Deferred so that the file
+	// order in the output matches the walk regardless of which worker finished
+	// first, and so that c.writers is only ever touched by one goroutine.
+	ct.Emit(func() error {
+		for _, d := range digests {
+			w, ok := c.writers[d.name]
+			if !ok {
+				var err error
+				w, err = c.ctx.Store.Open(c.rule.ID, "hashes", c.rule.OutputDir, name+"."+d.name)
+				if err != nil {
+					return content.Fatal(err)
+				}
+				c.writers[d.name] = w
+			}
+			// Two spaces before the path, matching md5sum/sha1sum output, which
+			// is what UAC's hash collector produces.
+			if err := w.Writef("%s  %s", hex.EncodeToString(d.h.Sum(nil)), f.Path); err != nil {
 				return content.Fatal(err)
 			}
-			c.writers[d.name] = w
 		}
-		// Two spaces before the path, matching md5sum/sha1sum output, which is
-		// what UAC's hash collector produces.
-		if err := w.Writef("%s  %s", hex.EncodeToString(d.h.Sum(nil)), f.Path); err != nil {
-			return content.Fatal(err)
+		return nil
+	})
+	return nil
+}
+
+// parallelHashFloor is the point above which running each digest on its own
+// goroutine pays for the synchronisation.
+//
+// UAC's default is md5 plus sha1, so this is a two-way fan-out. Below the
+// threshold the goroutine handoff costs more than the hashing itself -- most
+// collected artifacts are a few kilobytes -- so small buffers stay serial and
+// rely on cross-file parallelism instead.
+const parallelHashFloor = 256 << 10
+
+// hashChunk feeds one buffer to every digest.
+func hashChunk(digests []digester, buf []byte) {
+	if len(digests) < 2 || len(buf) < parallelHashFloor {
+		for _, d := range digests {
+			d.h.Write(buf)
+		}
+		return
+	}
+	var wg sync.WaitGroup
+	wg.Add(len(digests))
+	for _, d := range digests {
+		go func(h hash.Hash) {
+			defer wg.Done()
+			h.Write(buf)
+		}(d.h)
+	}
+	wg.Wait()
+}
+
+// hashStream feeds a large file to every digest a chunk at a time.
+//
+// io.MultiWriter would serialise the digests: with md5 and sha1 that is two
+// passes over every byte on one core. Fanning each chunk out instead overlaps
+// them, which is worth it precisely for the large files that take this path.
+func hashStream(digests []digester, r io.Reader) error {
+	buf := make([]byte, 512<<10)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			hashChunk(digests, buf[:n])
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
 		}
 	}
-	return nil
 }
 
 func (c *hashCollector) Flush() error {
@@ -354,11 +404,16 @@ func (c *fileCollector) copy(f *fsref.FileRef, ct content.Content) error {
 	if err := out.Close(); err != nil {
 		return content.Fatal(err)
 	}
-	w, err := c.writer("copies", "file_collector.txt")
-	if err != nil {
-		return content.Fatal(err)
-	}
-	return content.Fatal(w.WriteLine(f.Path))
+	// The bytes are written; only the manifest line is deferred, so the
+	// manifest stays in walk order however the copies interleave.
+	ct.Emit(func() error {
+		w, werr := c.writer("copies", "file_collector.txt")
+		if werr != nil {
+			return content.Fatal(werr)
+		}
+		return content.Fatal(w.WriteLine(f.Path))
+	})
+	return nil
 }
 
 // Finish collects the second phase of a two-phase artifact: the paths a list

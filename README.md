@@ -48,8 +48,9 @@ into the binary. Copy the executable to an examiner workstation and it works.
 Key flags: `-m` mount point, `-o` destination directory,
 `-output-base-name` to name the run directory yourself, `-s` target operating
 system, `-include`/`-exclude` artifact globs, `-start-date-days`/
-`-end-date-days` for the date range, `-buffer-limit` for the small-file
-threshold, `-version` to see which UAC corpus is baked in. To run against a newer or modified checkout instead of the
+`-end-date-days` for the date range, `-workers` for content concurrency,
+`-buffer-limit` for the small-file threshold, `-version` to see which UAC
+corpus is baked in. To run against a newer or modified checkout instead of the
 embedded copy, pass `-a /path/to/uac/artifacts` (which also switches `uac.conf`
 to that checkout's, so definitions and configuration never come from different
 places); `-c` overrides the config file on its own.
@@ -237,9 +238,44 @@ offset is shared state: hand out a `*os.File` and the second collector to call
 `Read` sees an empty file. Worse, a collector that closes it causes the number
 to be recycled, after which a retained reference silently reads a *different*
 file into the evidence output. Collectors get a revocable `ReadAt`-only view
-instead. Files below `-buffer-limit` are read into one reusable buffer — measured
+instead. Files below `-buffer-limit` are read into a pooled buffer — measured
 at the same cost as a streaming tee, but with random access for free — and larger
 ones stay on the descriptor.
+
+**The content phase runs on a worker pool.** Profiling a warm scan put 44% of
+the time in reading, hashing and copying, and a cold scan far more than that,
+because one thread waited for each open/read/write before starting the next.
+`-workers` (default: one per core) processes that many files concurrently. The
+walker itself stays single-threaded, which is what preserves the single-entry
+stat cache and deterministic rule evaluation.
+
+Parallelism must not change what a collection contains *or the order it is
+written in*, or two acquisitions of one image stop being diffable. So each
+consumer splits in two: the bulk — reading, hashing, copying bytes — runs in
+the worker, while the tail that appends a line to an output file is handed to
+`Emit` and replayed by a single sequencer goroutine in strict walk order. The
+same mechanism makes the errors log reproducible, and means collector state
+touched in a tail needs no locking. Measured on `/usr` (311,478 files, full
+offline set):
+
+| workers | elapsed | |
+|---|---|---|
+| 1 | 24.4s | |
+| 2 | 18.1s | |
+| 4 | 14.8s | |
+| 8 | 12.4s | |
+| 12 | 11.4s | **2.14×** |
+
+Hashing alone (2.7 GB of binaries) goes 18.8s → 6.4s, **2.9×**: MD5 and SHA-1
+were previously serialized through an `io.MultiWriter`, two passes over every
+byte on one core, and now fan out per chunk above a size floor where the
+handoff pays for itself. A metadata-only run is unchanged, since the pool never
+starts when nothing asks for bytes.
+
+Every worker count from 2 to 12 produces output byte-identical to `-workers 1`,
+verified by `diff -r` over the whole output tree including the copied files;
+`TestParallelOutputMatchesSerial` asserts the same property on deliberately
+uneven file sizes.
 
 **Results stream to disk.** A bodyfile for a million-inode image is well over a
 hundred megabytes and is one of hundreds of outputs, so nothing accumulates in

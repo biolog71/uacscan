@@ -216,22 +216,35 @@ func TestSmallFilesAreBufferedLargeOnesAreNot(t *testing.T) {
 	}
 }
 
+// Buffers come from a pool now rather than a single reused slice, so the
+// property to check is that repeated files do not each allocate a fresh one.
 func TestBufferIsReusedAcrossFiles(t *testing.T) {
 	dir := t.TempDir()
 	b := NewBroker()
-	var caps []int
+
+	var seen []*byte
 	for i := 0; i < 5; i++ {
 		ref := mkfile(t, dir, "f", bytes.Repeat([]byte("z"), 1000))
-		b.Want("c", func(c Content) error { return nil })
+		b.Want("c", func(c Content) error {
+			buf, ok := c.Bytes()
+			if !ok {
+				t.Error("small file was not buffered")
+				return nil
+			}
+			seen = append(seen, &buf[:1][0])
+			return nil
+		})
 		if err := b.Run(ref); err != nil {
 			t.Fatal(err)
 		}
-		caps = append(caps, cap(b.buf))
 	}
-	for i := 1; i < len(caps); i++ {
-		if caps[i] != caps[0] {
-			t.Errorf("buffer reallocated between files: %v", caps)
-			break
+	if len(seen) != 5 {
+		t.Fatalf("got %d buffers, want 5", len(seen))
+	}
+	// Serially, the pool should hand back the same allocation every time.
+	for i := 1; i < len(seen); i++ {
+		if seen[i] != seen[0] {
+			t.Errorf("buffer %d was a fresh allocation; the pool is not reusing", i)
 		}
 	}
 }

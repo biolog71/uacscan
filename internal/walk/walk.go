@@ -95,6 +95,12 @@ type frame struct {
 // that it is broken; per-file problems are routed to OnError and the walk
 // continues, because unreadable files are normal on real images.
 func (w *Walker) Walk() error {
+	// Every return path has to shut the content pool down, including the ones
+	// that abort on a fatal output failure -- otherwise the workers sit
+	// blocked on a queue nobody will close again. Wait is idempotent, so the
+	// explicit calls at the end still report their errors normally.
+	defer func() { _ = w.Broker.Wait() }()
+
 	root := strings.TrimSuffix(w.Root, "/")
 	if root == "" {
 		root = "/"
@@ -163,6 +169,13 @@ func (w *Walker) Walk() error {
 		stack = append(stack, dirs...)
 	}
 
+	// Content work is queued, so the traversal finishing does not mean the
+	// files have been read. Drain before the second phase, which needs the
+	// lists the first phase produced.
+	if err := w.Broker.Wait(); err != nil {
+		return err
+	}
+
 	// Second phase, for artifacts whose paths only became known during the
 	// walk -- a shell history file named inside an rc file, say.
 	for _, c := range w.Collectors {
@@ -171,6 +184,10 @@ func (w *Walker) Walk() error {
 				return fmt.Errorf("finishing collector: %w", err)
 			}
 		}
+	}
+	// The second phase queues content work of its own.
+	if err := w.Broker.Wait(); err != nil {
+		return err
 	}
 	return w.flush()
 }
