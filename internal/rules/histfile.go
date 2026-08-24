@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"uacscan/internal/fsref"
+	"github.com/biolog71/uacscan/internal/fsref"
 )
 
 // UAC determines where a shell keeps its history by grepping the shell's rc

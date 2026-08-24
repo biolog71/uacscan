@@ -17,7 +17,7 @@ import (
 	"strconv"
 	"strings"
 
-	"uacscan/internal/fsref"
+	"github.com/biolog71/uacscan/internal/fsref"
 )
 
 // DB is the account information read from one image.

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"uacscan/internal/fsref"
+	"github.com/biolog71/uacscan/internal/fsref"
 )
 
 // runOrder collects the order in which emitted tails ran, which is the order

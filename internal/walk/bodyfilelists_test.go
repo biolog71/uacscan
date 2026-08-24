@@ -7,16 +7,16 @@ import (
 	"testing"
 	"time"
 
-	"uacscan/collector"
-	"uacscan/internal/artifact"
-	"uacscan/internal/config"
-	"uacscan/internal/content"
-	"uacscan/internal/fsref"
-	"uacscan/internal/passwd"
-	"uacscan/internal/rules"
-	"uacscan/internal/spool"
-	"uacscan/internal/targetos"
-	"uacscan/test/fixture"
+	"github.com/biolog71/uacscan/collector"
+	"github.com/biolog71/uacscan/internal/artifact"
+	"github.com/biolog71/uacscan/internal/config"
+	"github.com/biolog71/uacscan/internal/content"
+	"github.com/biolog71/uacscan/internal/fsref"
+	"github.com/biolog71/uacscan/internal/passwd"
+	"github.com/biolog71/uacscan/internal/rules"
+	"github.com/biolog71/uacscan/internal/spool"
+	"github.com/biolog71/uacscan/internal/targetos"
+	"github.com/biolog71/uacscan/test/fixture"
 )
 
 // setupSourced is setup, except it compiles multiple artifact documents with

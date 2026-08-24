@@ -7,7 +7,7 @@ import (
 
 	"io/fs"
 
-	"uacscan/internal/uacdata"
+	"github.com/biolog71/uacscan/internal/uacdata"
 )
 
 func TestParseBodyfile(t *testing.T) {

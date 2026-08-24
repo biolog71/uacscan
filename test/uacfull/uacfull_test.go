@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"uacscan/internal/uacdata"
+	"github.com/biolog71/uacscan/internal/uacdata"
 )
 
 func TestExtractProducesARunnableUAC(t *testing.T) {

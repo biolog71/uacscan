@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"uacscan/internal/artifact"
-	"uacscan/internal/fsref"
-	"uacscan/internal/targetos"
-	"uacscan/internal/uacdata"
+	"github.com/biolog71/uacscan/internal/artifact"
+	"github.com/biolog71/uacscan/internal/fsref"
+	"github.com/biolog71/uacscan/internal/targetos"
+	"github.com/biolog71/uacscan/internal/uacdata"
 )
 
 func TestGlobSpansSlashLikeFind(t *testing.T) {

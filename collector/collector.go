@@ -21,10 +21,10 @@ import (
 	"strings"
 	"sync"
 
-	"uacscan/internal/content"
-	"uacscan/internal/fsref"
-	"uacscan/internal/rules"
-	"uacscan/internal/spool"
+	"github.com/biolog71/uacscan/internal/content"
+	"github.com/biolog71/uacscan/internal/fsref"
+	"github.com/biolog71/uacscan/internal/rules"
+	"github.com/biolog71/uacscan/internal/spool"
 )
 
 // Collector is the contract every collector satisfies.

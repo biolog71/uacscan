@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"uacscan/internal/uacpath"
+	"github.com/biolog71/uacscan/internal/uacpath"
 )
 
 func TestEmbeddedCorpusUnpacks(t *testing.T) {

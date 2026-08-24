@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"uacscan/internal/uacdata"
+	"github.com/biolog71/uacscan/internal/uacdata"
 )
 
 // The defaults must match UAC's shipped config, because that is what the

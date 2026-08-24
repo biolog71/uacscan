@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"uacscan/internal/artifact"
-	"uacscan/internal/fsref"
-	"uacscan/internal/mounts"
-	"uacscan/internal/targetos"
+	"github.com/biolog71/uacscan/internal/artifact"
+	"github.com/biolog71/uacscan/internal/fsref"
+	"github.com/biolog71/uacscan/internal/mounts"
+	"github.com/biolog71/uacscan/internal/targetos"
 )
 
 // Kind is the collector action a rule triggers.

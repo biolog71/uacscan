@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"testing"
 
-	"uacscan/internal/fsref"
+	"github.com/biolog71/uacscan/internal/fsref"
 )
 
 func mkfile(t *testing.T, dir, name string, data []byte) *fsref.FileRef {

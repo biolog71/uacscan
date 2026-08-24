@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"uacscan/test/uacfull"
+	"github.com/biolog71/uacscan/test/uacfull"
 )
 
 // TestDifferentialAgainstUAC is the integration test: it runs the real shell

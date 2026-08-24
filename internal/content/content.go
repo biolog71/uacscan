@@ -41,7 +41,7 @@ import (
 	"sync/atomic"
 	"syscall"
 
-	"uacscan/internal/fsref"
+	"github.com/biolog71/uacscan/internal/fsref"
 )
 
 // DefaultBufferLimit is the size below which a file is read into memory.

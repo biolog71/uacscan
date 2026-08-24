@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"uacscan/internal/uacdata"
+	"github.com/biolog71/uacscan/internal/uacdata"
 )
 
 // Two scans of different images running at the same time must not interfere.

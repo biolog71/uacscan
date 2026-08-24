@@ -4,7 +4,7 @@ import (
 	"strings"
 	"syscall"
 
-	"uacscan/internal/spool"
+	"github.com/biolog71/uacscan/internal/spool"
 )
 
 // bodyfileListsCollector is the native reimplementation of UAC's own

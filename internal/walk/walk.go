@@ -12,10 +12,10 @@ import (
 	"sort"
 	"strings"
 
-	"uacscan/collector"
-	"uacscan/internal/content"
-	"uacscan/internal/fsref"
-	"uacscan/internal/rules"
+	"github.com/biolog71/uacscan/collector"
+	"github.com/biolog71/uacscan/internal/content"
+	"github.com/biolog71/uacscan/internal/fsref"
+	"github.com/biolog71/uacscan/internal/rules"
 )
 
 // Walker performs the single pass.

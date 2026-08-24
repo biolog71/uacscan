@@ -15,7 +15,7 @@ import (
 	"sort"
 	"strings"
 
-	"uacscan/internal/fsref"
+	"github.com/biolog71/uacscan/internal/fsref"
 )
 
 // OS is one of the operating system names UAC's artifacts use in supported_os.

@@ -3,7 +3,7 @@ package rules
 import (
 	"strings"
 
-	"uacscan/internal/artifact"
+	"github.com/biolog71/uacscan/internal/artifact"
 )
 
 // KindBodyfileLists is not a UAC collector name. It is the native

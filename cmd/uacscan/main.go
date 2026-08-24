@@ -10,10 +10,10 @@ import (
 	"runtime"
 	"time"
 
-	"uacscan"
-	"uacscan/internal/content"
-	"uacscan/internal/targetos"
-	"uacscan/internal/uacdata"
+	"github.com/biolog71/uacscan"
+	"github.com/biolog71/uacscan/internal/content"
+	"github.com/biolog71/uacscan/internal/targetos"
+	"github.com/biolog71/uacscan/internal/uacdata"
 )
 
 func main() {

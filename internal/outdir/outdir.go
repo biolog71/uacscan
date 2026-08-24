@@ -26,8 +26,8 @@ import (
 	"strings"
 	"time"
 
-	"uacscan/internal/fsref"
-	"uacscan/internal/spool"
+	"github.com/biolog71/uacscan/internal/fsref"
+	"github.com/biolog71/uacscan/internal/spool"
 )
 
 // TimestampLayout is the 14-digit form UAC uses.

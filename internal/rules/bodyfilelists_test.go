@@ -3,7 +3,7 @@ package rules
 import (
 	"testing"
 
-	"uacscan/internal/artifact"
+	"github.com/biolog71/uacscan/internal/artifact"
 )
 
 func TestCompileBodyfileListsRecognisesTheRealCommand(t *testing.T) {
